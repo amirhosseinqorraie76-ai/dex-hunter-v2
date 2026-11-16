@@ -6,12 +6,16 @@ import requests
 from datetime import datetime, timezone
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_IDS = ["6665909136", "6765810776", "98529959"]
+
+CHAT_IDS = [
+    "6665909136",
+    "6765810776",
+    "98529959"
+]
 
 BASE = "https://api.dexscreener.com"
 SEEN_FILE = "seen_tokens.json"
 
-# V4 - Flexible filters
 MIN_LIQUIDITY = 8000
 MIN_VOLUME = 2000
 MIN_TXNS = 10
@@ -24,19 +28,30 @@ session.headers.update({"User-Agent": "DEX-Hunter-V4"})
 
 def telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    response = session.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": message,
-            "disable_web_page_preview": True
-        },
-        timeout=20
-    )
-    response.raise_for_status()
-    result = response.json()
-    if not result.get("ok"):
-        raise RuntimeError(str(result))
+    errors = []
+
+    for chat_id in CHAT_IDS:
+        try:
+            response = session.post(
+                url,
+                data={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "disable_web_page_preview": True
+                },
+                timeout=20
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            if not result.get("ok"):
+                errors.append(f"{chat_id}: {result}")
+
+        except Exception as error:
+            errors.append(f"{chat_id}: {error}")
+
+    if errors:
+        print("Telegram sending errors:", errors)
 
 
 def load_seen():
