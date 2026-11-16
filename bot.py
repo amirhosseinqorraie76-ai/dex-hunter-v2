@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+CHAT_IDS = ["6665909136", "6765810776", "98529959"]
 
 BASE = "https://api.dexscreener.com"
 SEEN_FILE = "seen_tokens.json"
