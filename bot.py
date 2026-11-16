@@ -5,8 +5,19 @@ import time
 import requests
 from datetime import datetime, timezone
 
+# =========================
+# DEX HUNTER V6.3
+# Persian + English
+# =========================
+
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_IDS = ["6665909136", "6765810776", "98529959"]
+
+CHAT_IDS = [
+    "6665909136",
+    "6765810776",
+    "98529959",
+    "1507608801"
+]
 
 DEX = "https://api.dexscreener.com"
 RUG = "https://api.rugcheck.xyz/v1/tokens"
@@ -25,7 +36,7 @@ MIN_SCORE_PREPUMP = 34
 MIN_SCORE_MOMENTUM = 40
 
 session = requests.Session()
-session.headers.update({"User-Agent": "DEX-Hunter-V6.1"})
+session.headers.update({"User-Agent": "DEX-Hunter-V6.3"})
 
 
 def num(value):
@@ -60,7 +71,7 @@ def send_telegram(message):
         print("ERROR: TELEGRAM_BOT_TOKEN is missing")
         return False
 
-    success = False
+    success_count = 0
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     for chat_id in CHAT_IDS:
@@ -74,11 +85,12 @@ def send_telegram(message):
                 },
                 timeout=20
             )
-            response.raise_for_status()
 
+            response.raise_for_status()
             result = response.json()
+
             if result.get("ok"):
-                success = True
+                success_count += 1
                 print("Telegram sent:", chat_id)
             else:
                 print("Telegram rejected:", chat_id, result)
@@ -86,7 +98,8 @@ def send_telegram(message):
         except Exception as error:
             print("Telegram error:", chat_id, str(error))
 
-    return success
+    print(f"Telegram delivery: {success_count}/{len(CHAT_IDS)}")
+    return success_count == len(CHAT_IDS)
 
 
 def load_state():
@@ -100,7 +113,6 @@ def load_state():
         clean = {}
 
         for address, value in raw.items():
-            # سازگاری با فایل ذخیره‌شده نسخه‌های قبلی
             if isinstance(value, dict):
                 clean[address] = value
             else:
@@ -183,6 +195,7 @@ def analyze(pair):
     created = pair.get("pairCreatedAt")
 
     age = None
+
     if created:
         age = max(
             0,
@@ -273,7 +286,7 @@ def analyze(pair):
         "change": c1,
         "change5": c5,
         "age": age,
-        "price": pair.get("priceUsd", "نامشخص")
+        "price": pair.get("priceUsd", "Unknown")
     }
 
 
@@ -281,9 +294,12 @@ def security_check(address):
     data = get_json(f"{RUG}/{address}/report", timeout=15)
 
     if not isinstance(data, dict):
-        return "نامشخص؛ گزارش امنیت دریافت نشد", [
-            "⚠️ امنیت این توکن تأیید نشده است"
-        ]
+        return (
+            "گزارش امنیت دریافت نشد | Security report unavailable",
+            [
+                "⚠️ امنیت تأیید نشده است | Security not verified"
+            ]
+        )
 
     warnings = []
 
@@ -292,12 +308,17 @@ def security_check(address):
     freeze = data.get("freezeAuthority") or token.get("freezeAuthority")
 
     if mint:
-        warnings.append("⚠️ اختیار ضرب توکن فعال است")
+        warnings.append(
+            "⚠️ اختیار ضرب توکن فعال است | Mint authority is active"
+        )
 
     if freeze:
-        warnings.append("⚠️ اختیار فریز توکن فعال است")
+        warnings.append(
+            "⚠️ اختیار فریز توکن فعال است | Freeze authority is active"
+        )
 
     holders = data.get("topHolders") or []
+
     percentages = [
         num(holder.get("pct"))
         for holder in holders[:10]
@@ -307,9 +328,15 @@ def security_check(address):
     concentration = sum(percentages)
 
     if percentages and concentration >= 80:
-        warnings.append("🚨 تمرکز بسیار زیاد در ۱۰ هولدر اول")
+        warnings.append(
+            "🚨 تمرکز بسیار زیاد در ۱۰ هولدر اول | "
+            "Very high concentration among top 10 holders"
+        )
     elif percentages and concentration >= 60:
-        warnings.append("⚠️ تمرکز بالا در ۱۰ هولدر اول")
+        warnings.append(
+            "⚠️ تمرکز بالا در ۱۰ هولدر اول | "
+            "High concentration among top 10 holders"
+        )
 
     for risk in data.get("risks") or []:
         if not isinstance(risk, dict):
@@ -319,12 +346,19 @@ def security_check(address):
         name = risk.get("name", "ریسک نامشخص")
 
         if level in ("danger", "critical", "high"):
-            warnings.append("🚨 " + str(name))
+            warnings.append(
+                f"🚨 ریسک: {name} | Risk: {name}"
+            )
 
     if not warnings:
-        warnings.append("ریسک مهمی در داده دریافتی ثبت نشده")
+        warnings.append(
+            "ریسک مهمی ثبت نشده | No major risk reported"
+        )
 
-    return "گزارش دریافت شد", warnings[:5]
+    return (
+        "گزارش دریافت شد | Report received",
+        warnings[:5]
+    )
 
 
 def classify(data):
@@ -342,7 +376,7 @@ def classify(data):
         and txns >= 3
         and score >= MIN_SCORE_EARLY
     ):
-        return "🟡 شکار زودهنگام"
+        return "🟡 شکار زودهنگام | Early Discovery"
 
     if (
         liquidity >= MIN_LIQ_PREPUMP
@@ -351,7 +385,7 @@ def classify(data):
         and score >= MIN_SCORE_PREPUMP
         and change <= 60
     ):
-        return "🟢 احتمال رشد اولیه"
+        return "🟢 احتمال رشد اولیه | Early Growth Potential"
 
     if (
         liquidity >= MIN_LIQ_MOMENTUM
@@ -360,52 +394,94 @@ def classify(data):
         and score >= MIN_SCORE_MOMENTUM
         and 0 < change <= 100
     ):
-        return "🔥 مومنتوم فعال"
+        return "🔥 مومنتوم فعال | Active Momentum"
 
     return None
 
 
 def make_message(name, symbol, address, pair, data, category, security):
     age = (
-        f"{fa(data['age'], 1)} ساعت"
-        if data["age"] is not None else "نامشخص"
+        f"{fa(data['age'], 1)} ساعت | {data['age']:.1f} hours"
+        if data["age"] is not None
+        else "نامشخص | Unknown"
     )
 
     warning_text = "\n".join(security[1])
     pair_address = pair.get("pairAddress", "")
 
+    score = data["score"]
+    ratio = data["ratio"]
+
+    if score >= 75:
+        analysis_fa = "قدرت بازار بالا است؛ اما ریسک همچنان وجود دارد."
+        analysis_en = "Market strength is high, but risk remains."
+    elif score >= 55:
+        analysis_fa = "نشانه‌های مثبتی دیده می‌شود؛ برای تأیید بیشتر بررسی کن."
+        analysis_en = "Positive signals detected; further confirmation is needed."
+    elif score >= 35:
+        analysis_fa = "سیگنال اولیه است و هنوز قدرت کافی تأیید نشده."
+        analysis_en = "Early signal; strength is not yet fully confirmed."
+    else:
+        analysis_fa = "قدرت سیگنال پایین است؛ احتیاط کن."
+        analysis_en = "Signal strength is low; proceed with caution."
+
+    if ratio > 1.5:
+        flow_fa = "تعداد خریدها از فروش‌ها بیشتر است."
+        flow_en = "Buy transactions are higher than sell transactions."
+    elif ratio >= 1:
+        flow_fa = "خرید و فروش تقریباً متعادل هستند."
+        flow_en = "Buying and selling activity is relatively balanced."
+    else:
+        flow_fa = "فشار فروش بیشتر از خرید است."
+        flow_en = "Selling pressure is stronger than buying pressure."
+
     return (
-        "🎯 DEX HUNTER V6.1\n"
+        "🎯 DEX HUNTER V6.3\n"
         "━━━━━━━━━━━━━━\n"
         f"🪙 {name} ({symbol})\n"
-        f"📌 نوع شکار: {category}\n"
-        f"⭐ امتیاز بازار: {fa(data['score'])}/۱۰۰\n\n"
-        "📊 تحلیل بازار\n"
-        f"💧 نقدینگی: ${fa(data['liquidity'])}\n"
-        f"📈 حجم یک‌ساعته: ${fa(data['volume'])}\n"
-        f"⚡ حجم ۵ دقیقه: ${fa(data['volume5'])}\n"
-        f"🟢 خرید یک‌ساعته: {fa(data['buys'])}\n"
-        f"🔴 فروش یک‌ساعته: {fa(data['sells'])}\n"
-        f"⚖️ نسبت خرید/فروش: {fa(data['ratio'], 2)}\n"
-        f"📈 تغییر ۵ دقیقه: {fa(data['change5'], 2)}٪\n"
-        f"📈 تغییر یک‌ساعته: {fa(data['change'], 2)}٪\n"
-        f"⏳ عمر استخر: {age}\n"
-        f"💵 قیمت: ${data['price']}\n\n"
-        "🛡️ بررسی امنیت\n"
-        f"وضعیت: {security[0]}\n"
+        f"📌 نوع شکار | Signal: {category}\n"
+        f"⭐ امتیاز بازار | Market Score: {fa(score)}/۱۰۰ | {score}/100\n\n"
+
+        "🇮🇷 تحلیل فارسی\n"
+        f"• {analysis_fa}\n"
+        f"• {flow_fa}\n\n"
+
+        "🇬🇧 English Analysis\n"
+        f"• {analysis_en}\n"
+        f"• {flow_en}\n\n"
+
+        "📊 اطلاعات بازار | Market Data\n"
+        f"💧 نقدینگی | Liquidity: ${fa(data['liquidity'])}\n"
+        f"📈 حجم یک‌ساعته | 1H Volume: ${fa(data['volume'])}\n"
+        f"⚡ حجم ۵ دقیقه | 5M Volume: ${fa(data['volume5'])}\n"
+        f"🟢 خرید یک‌ساعته | 1H Buys: {fa(data['buys'])}\n"
+        f"🔴 فروش یک‌ساعته | 1H Sells: {fa(data['sells'])}\n"
+        f"⚖️ نسبت خرید/فروش | Buy/Sell Ratio: {fa(ratio, 2)}\n"
+        f"📈 تغییر ۵ دقیقه | 5M Change: {fa(data['change5'], 2)}٪ | {data['change5']:.2f}%\n"
+        f"📈 تغییر یک‌ساعته | 1H Change: {fa(data['change'], 2)}٪ | {data['change']:.2f}%\n"
+        f"⏳ عمر استخر | Pool Age: {age}\n"
+        f"💵 قیمت | Price: ${data['price']}\n\n"
+
+        "🛡️ بررسی امنیت | Security Check\n"
+        f"وضعیت | Status: {security[0]}\n"
         f"{warning_text}\n\n"
-        "📍 قرارداد:\n"
+
+        "📍 آدرس قرارداد | Contract Address:\n"
         f"{address}\n\n"
-        "🔗 نمودار:\n"
+
+        "🔗 نمودار | Chart:\n"
         f"https://dexscreener.com/solana/{pair_address}\n\n"
+
         "⚠️ امتیاز بازار تضمین سود یا امنیت نیست.\n"
-        "⚠️ تعداد خرید و فروش، تعداد کیف پول‌های منحصربه‌فرد نیست."
+        "⚠️ Market score does not guarantee profit or safety.\n"
+        "⚠️ تعداد خرید و فروش، تعداد کیف پول‌های منحصربه‌فرد نیست.\n"
+        "⚠️ Transaction counts do not represent unique wallets."
     )
 
 
 def scan():
     if not BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
     state = load_state()
     candidates = discover_tokens()
@@ -416,6 +492,7 @@ def scan():
     for address, source in candidates:
         try:
             old = state.get(address, {})
+
             if not isinstance(old, dict):
                 old = {}
 
@@ -446,7 +523,11 @@ def scan():
             previous_volume = num(old.get("volume"))
 
             is_new = not old.get("sent")
-            score_upgrade = data["score"] >= previous_score + 10
+
+            score_upgrade = (
+                data["score"] >= previous_score + 10
+            )
+
             volume_jump = (
                 previous_volume > 0
                 and data["volume"] >= previous_volume * 2
@@ -471,8 +552,11 @@ def scan():
                 time.sleep(0.3)
             else:
                 security = (
-                    "در این نوبت بررسی نشد",
-                    ["⚠️ وضعیت امنیت نامشخص است"]
+                    "در این نوبت بررسی نشد | Not checked this scan",
+                    [
+                        "⚠️ وضعیت امنیت نامشخص است | "
+                        "Security status is unknown"
+                    ]
                 )
 
             message = make_message(
@@ -496,6 +580,7 @@ def scan():
                         timezone.utc
                     ).isoformat()
                 }
+
                 sent += 1
                 save_state(state)
 
@@ -511,7 +596,7 @@ def scan():
     save_state(state)
 
     print(
-        "DEX Hunter V6.1 finished | "
+        "DEX Hunter V6.3 finished | "
         f"Candidates: {len(candidates)} | "
         f"Alerts: {sent} | "
         f"Security checks: {security_checks}"
