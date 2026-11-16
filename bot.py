@@ -5,6 +5,7 @@ import time
 import requests
 from datetime import datetime, timezone
 
+# TELEGRAM
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 CHAT_IDS = [
@@ -13,22 +14,25 @@ CHAT_IDS = [
     "98529959"
 ]
 
+# DEXSCREENER
 BASE = "https://api.dexscreener.com"
 SEEN_FILE = "seen_tokens.json"
 
-MIN_LIQUIDITY = 8000
-MIN_VOLUME = 2000
-MIN_TXNS = 10
-MIN_SCORE = 45
-MAX_ALERTS = 10
+# V5 FILTERS
+MIN_LIQUIDITY = 5000
+MIN_VOLUME = 1000
+MIN_TXNS = 5
+MIN_SCORE = 30
+MAX_ALERTS = 20
 
 session = requests.Session()
-session.headers.update({"User-Agent": "DEX-Hunter-V4"})
+session.headers.update({
+    "User-Agent": "DEX-Hunter-V5"
+})
 
 
 def telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    errors = []
 
     for chat_id in CHAT_IDS:
         try:
@@ -41,17 +45,16 @@ def telegram(message):
                 },
                 timeout=20
             )
+
             response.raise_for_status()
 
             result = response.json()
+
             if not result.get("ok"):
-                errors.append(f"{chat_id}: {result}")
+                print(f"Telegram error {chat_id}: {result}")
 
         except Exception as error:
-            errors.append(f"{chat_id}: {error}")
-
-    if errors:
-        print("Telegram sending errors:", errors)
+            print(f"Telegram error {chat_id}: {error}")
 
 
 def load_seen():
@@ -68,15 +71,19 @@ def save_seen(data):
 
 
 def analyze(pair):
+
     liquidity = (pair.get("liquidity") or {}).get("usd", 0)
     volume = (pair.get("volume") or {}).get("h1", 0)
+
     tx = (pair.get("txns") or {}).get("h1") or {}
 
     buys = tx.get("buys", 0)
     sells = tx.get("sells", 0)
+
     total = buys + sells
 
     change = (pair.get("priceChange") or {}).get("h1", 0)
+
     fdv = pair.get("fdv") or 0
 
     created = pair.get("pairCreatedAt")
@@ -90,6 +97,7 @@ def analyze(pair):
 
     score = 0
 
+    # LIQUIDITY SCORE
     if liquidity >= 50000:
         score += 20
     elif liquidity >= 20000:
@@ -97,6 +105,7 @@ def analyze(pair):
     elif liquidity >= MIN_LIQUIDITY:
         score += 10
 
+    # VOLUME SCORE
     if volume >= 50000:
         score += 20
     elif volume >= 10000:
@@ -104,6 +113,7 @@ def analyze(pair):
     elif volume >= MIN_VOLUME:
         score += 10
 
+    # TRANSACTIONS SCORE
     if total >= 200:
         score += 20
     elif total >= 50:
@@ -111,6 +121,7 @@ def analyze(pair):
     elif total >= MIN_TXNS:
         score += 10
 
+    # BUY / SELL RATIO
     ratio = buys / max(sells, 1)
 
     if ratio >= 2:
@@ -122,6 +133,7 @@ def analyze(pair):
     else:
         score -= 10
 
+    # PRICE CHANGE
     if 3 <= change <= 30:
         score += 15
     elif 30 < change <= 60:
@@ -133,6 +145,7 @@ def analyze(pair):
     elif change < -10:
         score -= 10
 
+    # POOL AGE
     if age is not None:
         if 0 <= age <= 24:
             score += 10
@@ -144,6 +157,7 @@ def analyze(pair):
     if sells > buys:
         score -= 10
 
+    # RISK PENALTIES
     if fdv and liquidity and fdv / liquidity > 30:
         score -= 10
 
@@ -158,8 +172,10 @@ def analyze(pair):
         category = "OVERHEATED"
     elif score >= 65:
         category = "STRONG EARLY"
-    else:
+    elif score >= 45:
         category = "EARLY WATCH"
+    else:
+        category = "LOW SCORE - HIGH RISK"
 
     return {
         "score": score,
@@ -176,6 +192,7 @@ def analyze(pair):
 
 
 def scan():
+
     seen = load_seen()
     sent = 0
 
@@ -183,6 +200,7 @@ def scan():
         f"{BASE}/token-profiles/latest/v1",
         timeout=30
     )
+
     response.raise_for_status()
 
     tokens = response.json()
@@ -191,6 +209,7 @@ def scan():
         raise RuntimeError("Unexpected DexScreener response")
 
     for token in tokens:
+
         if token.get("chainId") != "solana":
             continue
 
@@ -200,30 +219,39 @@ def scan():
             continue
 
         try:
+
             r = session.get(
                 f"{BASE}/token-pairs/v1/solana/{address}",
                 timeout=20
             )
+
             r.raise_for_status()
+
             pairs = r.json()
 
             if not isinstance(pairs, list) or not pairs:
                 continue
 
             pairs.sort(
-                key=lambda p: (p.get("liquidity") or {}).get("usd", 0),
+                key=lambda p: (
+                    p.get("liquidity") or {}
+                ).get("usd", 0),
                 reverse=True
             )
 
             for pair in pairs:
+
                 data = analyze(pair)
 
                 if data["liquidity"] < MIN_LIQUIDITY:
                     continue
+
                 if data["volume"] < MIN_VOLUME:
                     continue
+
                 if data["buys"] + data["sells"] < MIN_TXNS:
                     continue
+
                 if data["score"] < MIN_SCORE:
                     continue
 
@@ -231,8 +259,10 @@ def scan():
                     continue
 
                 base = pair.get("baseToken") or {}
+
                 name = base.get("name", "Unknown")
                 symbol = base.get("symbol", "N/A")
+
                 pair_address = pair.get("pairAddress", "")
 
                 age_text = (
@@ -242,7 +272,7 @@ def scan():
                 )
 
                 message = (
-                    "🎯 DEX HUNTER V4\n"
+                    "🎯 DEX HUNTER V5\n"
                     "━━━━━━━━━━━━━━\n"
                     f"🪙 {name} ({symbol})\n"
                     f"📌 {data['category']}\n"
@@ -258,6 +288,7 @@ def scan():
                     f"📍 Token:\n{address}\n\n"
                     f"🔗 Chart:\n"
                     f"https://dexscreener.com/solana/{pair_address}\n\n"
+                    "⚠️ High-risk tokens may be included.\n"
                     "⚠️ Score is not a guarantee of safety or profit."
                 )
 
@@ -268,6 +299,7 @@ def scan():
                 ).isoformat()
 
                 save_seen(seen)
+
                 sent += 1
                 break
 
@@ -279,7 +311,7 @@ def scan():
 
         time.sleep(0.15)
 
-    print(f"DEX HUNTER V4 finished. Alerts: {sent}")
+    print(f"DEX HUNTER V5 finished. Alerts: {sent}")
 
 
 if __name__ == "__main__":
