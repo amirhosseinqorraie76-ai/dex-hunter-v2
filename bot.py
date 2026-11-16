@@ -1,6 +1,7 @@
 
 import os
 import json
+import time
 import requests
 from datetime import datetime, timezone
 
@@ -10,39 +11,45 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 BASE = "https://api.dexscreener.com"
 SEEN_FILE = "seen_tokens.json"
 
-MIN_LIQUIDITY = 15000
-MIN_VOLUME = 5000
-MIN_TXNS = 20
-MIN_SCORE = 60
+# V4 - Flexible filters
+MIN_LIQUIDITY = 8000
+MIN_VOLUME = 2000
+MIN_TXNS = 10
+MIN_SCORE = 45
 MAX_ALERTS = 10
 
 session = requests.Session()
-session.headers.update({"User-Agent": "DEX-Hunter-V3"})
+session.headers.update({"User-Agent": "DEX-Hunter-V4"})
+
+
+def telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    response = session.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": message,
+            "disable_web_page_preview": True
+        },
+        timeout=20
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(str(result))
 
 
 def load_seen():
     try:
-        with open(SEEN_FILE) as f:
+        with open(SEEN_FILE, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except Exception:
         return {}
 
 
 def save_seen(data):
     with open(SEEN_FILE, "w") as f:
         json.dump(data, f)
-
-
-def send_message(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = session.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True
-    }, timeout=20)
-    r.raise_for_status()
-    if not r.json().get("ok"):
-        raise RuntimeError("Telegram send failed")
 
 
 def analyze(pair):
@@ -58,52 +65,49 @@ def analyze(pair):
     fdv = pair.get("fdv") or 0
 
     created = pair.get("pairCreatedAt")
-    age_hours = None
+    age = None
 
     if created:
-        age_hours = (
+        age = (
             datetime.now(timezone.utc).timestamp()
             - created / 1000
         ) / 3600
 
     score = 0
 
-    # Liquidity
     if liquidity >= 50000:
         score += 20
-    elif liquidity >= 25000:
+    elif liquidity >= 20000:
         score += 15
     elif liquidity >= MIN_LIQUIDITY:
         score += 10
 
-    # Trading volume
     if volume >= 50000:
-        score += 25
-    elif volume >= 15000:
         score += 20
-    elif volume >= MIN_VOLUME:
+    elif volume >= 10000:
         score += 15
+    elif volume >= MIN_VOLUME:
+        score += 10
 
-    # Transaction activity
     if total >= 200:
         score += 20
-    elif total >= 80:
+    elif total >= 50:
         score += 15
     elif total >= MIN_TXNS:
         score += 10
 
-    # Buy pressure
     ratio = buys / max(sells, 1)
 
-    if ratio >= 1.5:
+    if ratio >= 2:
         score += 15
-    elif ratio >= 1.2:
+    elif ratio >= 1.3:
         score += 10
     elif ratio >= 1:
         score += 5
+    else:
+        score -= 10
 
-    # Early momentum
-    if 5 <= change <= 30:
+    if 3 <= change <= 30:
         score += 15
     elif 30 < change <= 60:
         score += 8
@@ -114,16 +118,14 @@ def analyze(pair):
     elif change < -10:
         score -= 10
 
-    # Pool age
-    if age_hours is not None:
-        if 0 <= age_hours <= 24:
+    if age is not None:
+        if 0 <= age <= 24:
             score += 10
-        elif age_hours <= 72:
+        elif age <= 72:
             score += 5
-        elif age_hours < 0:
+        elif age < 0:
             score -= 10
 
-    # Risk penalties
     if sells > buys:
         score -= 10
 
@@ -136,11 +138,13 @@ def analyze(pair):
     score = max(0, min(100, score))
 
     if change > 100:
-        category = "PUMP"
+        category = "PUMP - HIGH RISK"
     elif change > 60:
         category = "OVERHEATED"
+    elif score >= 65:
+        category = "STRONG EARLY"
     else:
-        category = "EARLY"
+        category = "EARLY WATCH"
 
     return {
         "score": score,
@@ -151,20 +155,25 @@ def analyze(pair):
         "sells": sells,
         "change": change,
         "price": pair.get("priceUsd", "N/A"),
-        "age": age_hours,
+        "age": age,
         "ratio": ratio
     }
 
 
 def scan():
     seen = load_seen()
+    sent = 0
 
-    url = f"{BASE}/token-profiles/latest/v1"
-    response = session.get(url, timeout=30)
+    response = session.get(
+        f"{BASE}/token-profiles/latest/v1",
+        timeout=30
+    )
     response.raise_for_status()
 
     tokens = response.json()
-    sent = 0
+
+    if not isinstance(tokens, list):
+        raise RuntimeError("Unexpected DexScreener response")
 
     for token in tokens:
         if token.get("chainId") != "solana":
@@ -176,13 +185,14 @@ def scan():
             continue
 
         try:
-            url = f"{BASE}/token-pairs/v1/solana/{address}"
-            r = session.get(url, timeout=20)
+            r = session.get(
+                f"{BASE}/token-pairs/v1/solana/{address}",
+                timeout=20
+            )
             r.raise_for_status()
-
             pairs = r.json()
 
-            if not isinstance(pairs, list):
+            if not isinstance(pairs, list) or not pairs:
                 continue
 
             pairs.sort(
@@ -202,28 +212,25 @@ def scan():
                 if data["score"] < MIN_SCORE:
                     continue
 
+                if data["age"] is not None and data["age"] < 0:
+                    continue
+
                 base = pair.get("baseToken") or {}
                 name = base.get("name", "Unknown")
                 symbol = base.get("symbol", "N/A")
                 pair_address = pair.get("pairAddress", "")
 
-                labels = {
-                    "EARLY": "🟢 فرصت اولیه",
-                    "PUMP": "🔴 پامپ پرریسک",
-                    "OVERHEATED": "🟠 احتمال ورود دیرهنگام"
-                }
-
-                age = (
-                    f"{data['age']:.1f} ساعت"
+                age_text = (
+                    f"{data['age']:.1f} hours"
                     if data["age"] is not None
-                    else "نامشخص"
+                    else "Unknown"
                 )
 
                 message = (
-                    "🎯 DEX HUNTER V3\n"
+                    "🎯 DEX HUNTER V4\n"
                     "━━━━━━━━━━━━━━\n"
                     f"🪙 {name} ({symbol})\n"
-                    f"{labels[data['category']]}\n"
+                    f"📌 {data['category']}\n"
                     f"⭐ SCORE: {data['score']}/100\n\n"
                     f"💧 Liquidity: ${data['liquidity']:,.0f}\n"
                     f"📊 Volume 1H: ${data['volume']:,.0f}\n"
@@ -231,15 +238,15 @@ def scan():
                     f"🔴 Sells: {data['sells']}\n"
                     f"⚖️ Buy/Sell: {data['ratio']:.2f}\n"
                     f"📈 Change 1H: {data['change']}%\n"
-                    f"⏳ Pool Age: {age}\n"
+                    f"⏳ Pool Age: {age_text}\n"
                     f"💵 Price: ${data['price']}\n\n"
                     f"📍 Token:\n{address}\n\n"
                     f"🔗 Chart:\n"
                     f"https://dexscreener.com/solana/{pair_address}\n\n"
-                    "⚠️ امتیاز، تضمین امنیت یا سود نیست."
+                    "⚠️ Score is not a guarantee of safety or profit."
                 )
 
-                send_message(message)
+                telegram(message)
 
                 seen[address] = datetime.now(
                     timezone.utc
@@ -253,9 +260,11 @@ def scan():
                 break
 
         except Exception as error:
-            print(f"Error {address}: {error}")
+            print(f"Token error {address}: {error}")
 
-    print(f"V3 scan finished. Alerts: {sent}")
+        time.sleep(0.15)
+
+    print(f"DEX HUNTER V4 finished. Alerts: {sent}")
 
 
 if __name__ == "__main__":
