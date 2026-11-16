@@ -13,21 +13,28 @@ CHAT_IDS = [
     "98529959"
 ]
 
-BASE = "https://api.dexscreener.com"
-SEEN_FILE = "seen_tokens.json"
+DEX = "https://api.dexscreener.com"
+RUG = "https://api.rugcheck.xyz/v1/tokens"
+STATE_FILE = "seen_tokens.json"
 
-# فیلترهای نسخه پنجم
-MIN_LIQUIDITY = 5000
-MIN_VOLUME = 1000
-MIN_TXNS = 5
-MIN_SCORE = 30
+# فیلترهای نسخه V6
 MAX_ALERTS = 20
+MAX_CANDIDATES = 65
+MAX_SECURITY_CHECKS = 8
+
+MIN_LIQ_EARLY = 2500
+MIN_LIQ_PREPUMP = 4000
+MIN_LIQ_MOMENTUM = 5000
+
+MIN_SCORE_EARLY = 26
+MIN_SCORE_PREPUMP = 34
+MIN_SCORE_MOMENTUM = 40
 
 session = requests.Session()
-session.headers.update({"User-Agent": "DEX-Hunter-V5"})
+session.headers.update({"User-Agent": "DEX-Hunter-V6"})
 
 
-def fa_num(value, decimals=0):
+def fa(value, decimals=0):
     try:
         return f"{float(value):,.{decimals}f}".translate(
             str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
@@ -36,12 +43,29 @@ def fa_num(value, decimals=0):
         return str(value)
 
 
+def number(value):
+    try:
+        return float(value or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def get_json(url, timeout=20):
+    try:
+        r = session.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print("API error:", url, e)
+        return None
+
+
 def telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     for chat_id in CHAT_IDS:
         try:
-            response = session.post(
+            r = session.post(
                 url,
                 data={
                     "chat_id": chat_id,
@@ -50,252 +74,412 @@ def telegram(message):
                 },
                 timeout=20
             )
-            response.raise_for_status()
+            r.raise_for_status()
 
-            result = response.json()
-            if not result.get("ok"):
-                print(f"خطای تلگرام {chat_id}: {result}")
+            if not r.json().get("ok"):
+                print("Telegram rejected:", chat_id, r.text)
 
-        except Exception as error:
-            print(f"خطای ارسال به {chat_id}: {error}")
+        except Exception as e:
+            print("Telegram error:", chat_id, e)
 
 
-def load_seen():
+def load_state():
     try:
-        with open(SEEN_FILE, "r") as f:
-            return json.load(f)
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
-def save_seen(data):
-    with open(SEEN_FILE, "w") as f:
+def save_state(data):
+    with open(STATE_FILE, "w") as f:
         json.dump(data, f)
 
 
+def discover_tokens():
+    endpoints = [
+        "/token-profiles/latest/v1",
+        "/token-boosts/latest/v1",
+        "/token-boosts/top/v1",
+        "/community-takeovers/latest/v1"
+    ]
+
+    found = {}
+
+    for endpoint in endpoints:
+        data = get_json(DEX + endpoint)
+
+        if not isinstance(data, list):
+            continue
+
+        for item in data:
+            if item.get("chainId") != "solana":
+                continue
+
+            address = item.get("tokenAddress")
+
+            if address:
+                found[address] = item
+
+    print("Discovered tokens:", len(found))
+    return list(found.items())[:MAX_CANDIDATES]
+
+
 def analyze(pair):
-    liquidity = (pair.get("liquidity") or {}).get("usd", 0)
-    volume = (pair.get("volume") or {}).get("h1", 0)
+    liquidity = number((pair.get("liquidity") or {}).get("usd"))
 
-    tx = (pair.get("txns") or {}).get("h1") or {}
-    buys = tx.get("buys", 0)
-    sells = tx.get("sells", 0)
-    total = buys + sells
+    volume = pair.get("volume") or {}
+    v5 = number(volume.get("m5"))
+    v1 = number(volume.get("h1"))
 
-    change = (pair.get("priceChange") or {}).get("h1", 0)
-    fdv = pair.get("fdv") or 0
+    txns = pair.get("txns") or {}
+    t5 = txns.get("m5") or {}
+    t1 = txns.get("h1") or {}
 
+    buys5 = number(t5.get("buys"))
+    sells5 = number(t5.get("sells"))
+    buys1 = number(t1.get("buys"))
+    sells1 = number(t1.get("sells"))
+
+    total1 = buys1 + sells1
+    ratio = buys1 / max(sells1, 1)
+
+    change = pair.get("priceChange") or {}
+    c5 = number(change.get("m5"))
+    c1 = number(change.get("h1"))
+
+    fdv = number(pair.get("fdv"))
     created = pair.get("pairCreatedAt")
-    age = None
 
+    age = None
     if created:
         age = (
             datetime.now(timezone.utc).timestamp()
-            - created / 1000
+            - number(created) / 1000
         ) / 3600
 
+    # امتیاز بازار؛ مستقل از امتیاز امنیت
     score = 0
 
     if liquidity >= 50000:
-        score += 20
-    elif liquidity >= 20000:
         score += 15
-    elif liquidity >= MIN_LIQUIDITY:
-        score += 10
+    elif liquidity >= 15000:
+        score += 12
+    elif liquidity >= 5000:
+        score += 9
+    elif liquidity >= 2500:
+        score += 5
 
-    if volume >= 50000:
-        score += 20
-    elif volume >= 10000:
+    if v1 >= 50000:
         score += 15
-    elif volume >= MIN_VOLUME:
-        score += 10
+    elif v1 >= 10000:
+        score += 12
+    elif v1 >= 1000:
+        score += 8
+    elif v1 >= 300:
+        score += 4
 
-    if total >= 200:
-        score += 20
-    elif total >= 50:
+    if total1 >= 200:
         score += 15
-    elif total >= MIN_TXNS:
-        score += 10
-
-    ratio = buys / max(sells, 1)
+    elif total1 >= 50:
+        score += 12
+    elif total1 >= 10:
+        score += 8
+    elif total1 >= 3:
+        score += 4
 
     if ratio >= 2:
         score += 15
-    elif ratio >= 1.3:
-        score += 10
+    elif ratio >= 1.5:
+        score += 12
     elif ratio >= 1:
-        score += 5
-    else:
-        score -= 10
-
-    if 3 <= change <= 30:
-        score += 15
-    elif 30 < change <= 60:
         score += 8
-    elif change > 100:
-        score -= 20
-    elif change > 60:
-        score -= 10
-    elif change < -10:
-        score -= 10
+    else:
+        score -= 8
+
+    if 0 < c5 <= 10:
+        score += 8
+    elif c5 > 10:
+        score += 5
+    elif c5 < -5:
+        score -= 5
+
+    if 3 <= c1 <= 30:
+        score += 10
+    elif 30 < c1 <= 60:
+        score += 6
+    elif c1 > 100:
+        score -= 15
+    elif c1 < -10:
+        score -= 8
 
     if age is not None:
-        if 0 <= age <= 24:
+        if 0 <= age <= 6:
             score += 10
+        elif age <= 24:
+            score += 8
         elif age <= 72:
-            score += 5
-        elif age < 0:
-            score -= 10
+            score += 4
 
-    if sells > buys:
-        score -= 10
+    if fdv and liquidity and fdv / liquidity > 40:
+        score -= 8
 
-    if fdv and liquidity and fdv / liquidity > 30:
-        score -= 10
-
-    if liquidity and volume / liquidity > 10:
-        score -= 10
+    if liquidity and v1 / liquidity > 15:
+        score -= 5
 
     score = max(0, min(100, score))
 
-    if change > 100:
-        category = "🚨 پامپ با ریسک بسیار بالا"
-    elif change > 60:
-        category = "🔥 رشد بیش از حد"
-    elif score >= 65:
-        category = "🟢 فرصت اولیه قوی"
-    elif score >= 45:
-        category = "👀 زیر نظر بگیر"
-    else:
-        category = "⚠️ امتیاز پایین و ریسک بالا"
-
     return {
         "score": score,
-        "category": category,
         "liquidity": liquidity,
-        "volume": volume,
-        "buys": buys,
-        "sells": sells,
-        "change": change,
-        "price": pair.get("priceUsd", "نامشخص"),
+        "volume": v1,
+        "volume5": v5,
+        "buys": buys1,
+        "sells": sells1,
+        "buys5": buys5,
+        "sells5": sells5,
+        "ratio": ratio,
+        "change": c1,
+        "change5": c5,
         "age": age,
-        "ratio": ratio
+        "price": pair.get("priceUsd", "نامشخص"),
+        "fdv": fdv
     }
 
 
-def scan():
-    seen = load_seen()
-    sent = 0
+def security_check(address):
+    data = get_json(f"{RUG}/{address}/report", timeout=15)
 
-    response = session.get(
-        f"{BASE}/token-profiles/latest/v1",
-        timeout=30
+    if not isinstance(data, dict):
+        return {
+            "status": "نامشخص؛ سرویس پاسخ نداد",
+            "warnings": []
+        }
+
+    token = data.get("token") or {}
+    warnings = []
+
+    mint = data.get("mintAuthority") or token.get("mintAuthority")
+    freeze = data.get("freezeAuthority") or token.get("freezeAuthority")
+
+    if mint:
+        warnings.append("⚠️ اختیار ضرب توکن فعال است")
+
+    if freeze:
+        warnings.append("⚠️ اختیار فریز توکن فعال است")
+
+    holders = data.get("topHolders") or []
+    percentages = [
+        number(h.get("pct"))
+        for h in holders[:10]
+        if isinstance(h, dict)
+    ]
+
+    concentration = sum(percentages)
+
+    if percentages:
+        if concentration >= 80:
+            warnings.append("🚨 تمرکز بسیار زیاد در ۱۰ هولدر اول")
+        elif concentration >= 60:
+            warnings.append("⚠️ تمرکز بالا در ۱۰ هولدر اول")
+
+    risks = data.get("risks") or []
+
+    for risk in risks:
+        if not isinstance(risk, dict):
+            continue
+
+        level = str(risk.get("level", "")).lower()
+        name = risk.get("name", "ریسک نامشخص")
+
+        if level in ("danger", "critical", "high"):
+            warnings.append("🚨 " + str(name))
+
+    if not warnings:
+        warnings.append("ریسک مهمی در گزارش دریافتی ثبت نشده")
+
+    return {
+        "status": "گزارش دریافت شد",
+        "warnings": warnings[:5]
+    }
+
+
+def classify(data):
+    score = data["score"]
+    liquidity = data["liquidity"]
+    volume = data["volume"]
+    txns = data["buys"] + data["sells"]
+    change = data["change"]
+
+    if (
+        liquidity >= MIN_LIQ_EARLY
+        and volume >= 300
+        and txns >= 3
+        and score >= MIN_SCORE_EARLY
+        and data["age"] is not None
+        and data["age"] <= 6
+    ):
+        return "🟡 شکار زودهنگام", "early"
+
+    if (
+        liquidity >= MIN_LIQ_PREPUMP
+        and volume >= 1000
+        and txns >= 5
+        and score >= MIN_SCORE_PREPUMP
+        and change <= 60
+    ):
+        return "🟢 احتمال رشد اولیه", "prepump"
+
+    if (
+        liquidity >= MIN_LIQ_MOMENTUM
+        and volume >= 2000
+        and txns >= 8
+        and score >= MIN_SCORE_MOMENTUM
+        and 0 < change <= 100
+    ):
+        return "🔥 مومنتوم فعال", "momentum"
+
+    return None, None
+
+
+def make_message(name, symbol, address, pair, data, category, security):
+    pair_address = pair.get("pairAddress", "")
+    age = (
+        f"{fa(data['age'], 1)} ساعت"
+        if data["age"] is not None
+        else "نامشخص"
     )
-    response.raise_for_status()
 
-    tokens = response.json()
+    warnings = security["warnings"]
+    warning_text = "\n".join(warnings)
 
-    if not isinstance(tokens, list):
-        raise RuntimeError("پاسخ نامعتبر از DexScreener")
+    return (
+        "🎯 DEX HUNTER V6\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🪙 {name} ({symbol})\n"
+        f"📌 نوع شکار: {category}\n"
+        f"⭐ امتیاز بازار: {fa(data['score'])}/۱۰۰\n\n"
+        "📊 تحلیل بازار\n"
+        f"💧 نقدینگی: ${fa(data['liquidity'])}\n"
+        f"📈 حجم یک‌ساعته: ${fa(data['volume'])}\n"
+        f"⚡ حجم ۵ دقیقه: ${fa(data['volume5'])}\n"
+        f"🟢 خرید یک‌ساعته: {fa(data['buys'])}\n"
+        f"🔴 فروش یک‌ساعته: {fa(data['sells'])}\n"
+        f"⚖️ نسبت خرید/فروش: {fa(data['ratio'], 2)}\n"
+        f"📈 تغییر قیمت ۵ دقیقه: {fa(data['change5'], 2)}٪\n"
+        f"📈 تغییر قیمت یک‌ساعته: {fa(data['change'], 2)}٪\n"
+        f"⏳ عمر استخر: {age}\n"
+        f"💵 قیمت: ${data['price']}\n\n"
+        "🛡️ بررسی امنیت\n"
+        f"وضعیت: {security['status']}\n"
+        f"{warning_text}\n\n"
+        "📍 قرارداد:\n"
+        f"{address}\n\n"
+        f"🔗 نمودار:\nhttps://dexscreener.com/solana/{pair_address}\n\n"
+        "⚠️ امتیاز بازار، تضمین سود یا امنیت نیست.\n"
+        "⚠️ تعداد خرید و فروش، تعداد کیف پول‌های منحصربه‌فرد نیست."
+    )
 
-    for token in tokens:
-        if token.get("chainId") != "solana":
+
+def scan():
+    state = load_state()
+    candidates = discover_tokens()
+
+    sent = 0
+    security_checks = 0
+
+    for address, source in candidates:
+        old = state.get(address, {})
+
+        pairs = get_json(
+            f"{DEX}/token-pairs/v1/solana/{address}"
+        )
+
+        if not isinstance(pairs, list) or not pairs:
             continue
 
-        address = token.get("tokenAddress")
+        pairs.sort(
+            key=lambda p: number(
+                (p.get("liquidity") or {}).get("usd")
+            ),
+            reverse=True
+        )
 
-        if not address or address in seen:
+        pair = pairs[0]
+        base = pair.get("baseToken") or {}
+
+        data = analyze(pair)
+        category, mode = classify(data)
+
+        if not category:
             continue
 
-        try:
-            r = session.get(
-                f"{BASE}/token-pairs/v1/solana/{address}",
-                timeout=20
-            )
-            r.raise_for_status()
+        previous_score = number(old.get("score"))
+        previous_volume = number(old.get("volume"))
 
-            pairs = r.json()
+        is_new = not old.get("sent")
+        score_upgrade = data["score"] >= previous_score + 10
+        volume_jump = (
+            previous_volume > 0
+            and data["volume"] >= previous_volume * 2
+        )
 
-            if not isinstance(pairs, list) or not pairs:
-                continue
+        should_alert = (
+            is_new
+            or (old.get("sent") and (score_upgrade or volume_jump))
+        )
 
-            pairs.sort(
-                key=lambda p: (
-                    p.get("liquidity") or {}
-                ).get("usd", 0),
-                reverse=True
-            )
+        if not should_alert:
+            old["score"] = data["score"]
+            old["volume"] = data["volume"]
+            state[address] = old
+            continue
 
-            for pair in pairs:
-                data = analyze(pair)
+        if security_checks < MAX_SECURITY_CHECKS:
+            security = security_check(address)
+            security_checks += 1
+            time.sleep(0.3)
+        else:
+            security = {
+                "status": "در این نوبت بررسی نشد",
+                "warnings": ["⚠️ وضعیت امنیت نامشخص است"]
+            }
 
-                if data["liquidity"] < MIN_LIQUIDITY:
-                    continue
+        name = base.get("name", "Unknown")
+        symbol = base.get("symbol", "N/A")
 
-                if data["volume"] < MIN_VOLUME:
-                    continue
+        message = make_message(
+            name, symbol, address, pair,
+            data, category, security
+        )
 
-                if data["buys"] + data["sells"] < MIN_TXNS:
-                    continue
+        telegram(message)
 
-                if data["score"] < MIN_SCORE:
-                    continue
+        state[address] = {
+            "sent": True,
+            "score": data["score"],
+            "volume": data["volume"],
+            "last_alert": datetime.now(timezone.utc).isoformat()
+        }
 
-                if data["age"] is not None and data["age"] < 0:
-                    continue
+        save_state(state)
 
-                base = pair.get("baseToken") or {}
-                name = base.get("name", "Unknown")
-                symbol = base.get("symbol", "N/A")
-                pair_address = pair.get("pairAddress", "")
+        sent += 1
 
-                age_text = (
-                    f"{fa_num(data['age'], 1)} ساعت"
-                    if data["age"] is not None
-                    else "نامشخص"
-                )
+        if sent >= MAX_ALERTS:
+            break
 
-                message = (
-                    "🎯 شکارچی ارز دیجیتال V5\n"
-                    "━━━━━━━━━━━━━━\n"
-                    f"🪙 نام ارز: {name} ({symbol})\n"
-                    f"📌 وضعیت: {data['category']}\n"
-                    f"⭐ امتیاز: {fa_num(data['score'])} از ۱۰۰\n\n"
-                    f"💧 نقدینگی: ${fa_num(data['liquidity'])}\n"
-                    f"📊 حجم معاملات یک‌ساعته: ${fa_num(data['volume'])}\n"
-                    f"🟢 تعداد خرید: {fa_num(data['buys'])}\n"
-                    f"🔴 تعداد فروش: {fa_num(data['sells'])}\n"
-                    f"⚖️ نسبت خرید به فروش: {fa_num(data['ratio'], 2)}\n"
-                    f"📈 تغییر قیمت یک‌ساعته: {fa_num(data['change'], 2)}٪\n"
-                    f"⏳ عمر استخر: {age_text}\n"
-                    f"💵 قیمت: ${data['price']}\n\n"
-                    f"📍 آدرس قرارداد:\n{address}\n\n"
-                    f"🔗 مشاهده نمودار:\n"
-                    f"https://dexscreener.com/solana/{pair_address}\n\n"
-                    "⚠️ این امتیاز تضمین امنیت یا سود نیست.\n"
-                    "⚠️ توکن‌های تازه و کم‌نقدشونده ریسک بالایی دارند."
-                )
+        time.sleep(0.2)
 
-                telegram(message)
+    save_state(state)
 
-                seen[address] = datetime.now(
-                    timezone.utc
-                ).isoformat()
-
-                save_seen(seen)
-
-                sent += 1
-                break
-
-            if sent >= MAX_ALERTS:
-                break
-
-        except Exception as error:
-            print(f"خطا در بررسی توکن {address}: {error}")
-
-        time.sleep(0.15)
-
-    print(f"اسکن V5 تمام شد. تعداد سیگنال‌ها: {sent}")
+    print(
+        f"DEX Hunter V6 finished. "
+        f"Candidates: {len(candidates)} | "
+        f"Alerts: {sent} | "
+        f"Security checks: {security_checks}"
+    )
 
 
 if __name__ == "__main__":
