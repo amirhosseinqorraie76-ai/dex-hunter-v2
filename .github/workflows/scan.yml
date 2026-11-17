@@ -1,5 +1,5 @@
 
-name: DEX Hunter V7
+name: DEX Hunter V10
 
 on:
   schedule:
@@ -16,11 +16,13 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -35,10 +37,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python bot.py
 
-      - name: Save detected tokens
+      - name: Save scanner memory
         run: |
           git config user.name "DEX Hunter"
           git config user.email "actions@github.com"
-          git add seen_tokens.json
-          git diff --cached --quiet || git commit -m "Update scanner state"
+          git add seen.json
+          git diff --cached --quiet || git commit -m "Update DEX Hunter V10 memory"
           git push
