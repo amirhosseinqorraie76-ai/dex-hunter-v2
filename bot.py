@@ -5,9 +5,9 @@ import time
 import requests
 from datetime import datetime, timezone
 
-# ==========================================
-# DEX HUNTER V8 - SOLANA POOL ATH SCANNER
-# ==========================================
+# ==================================================
+# DEX HUNTER V9 - TWO INDEPENDENT SOLANA SCANNERS
+# ==================================================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -27,27 +27,35 @@ GMGN_CHAIN = "sol"
 
 STATE_FILE = "seen_tokens.json"
 
-# New filters
+# FILTER 1: ATH DROP
 DROP_THRESHOLD = 70
 MIN_MARKET_CAP = 500000
+MAX_ATH_CANDIDATES = 35
+MAX_ATH_ALERTS = 20
 
-# Scanner limits
-MAX_CANDIDATES = 35
-MAX_ALERTS = 20
+# FILTER 2: OLD POOL + HIGH VOLUME
+MIN_POOL_AGE_DAYS = 7
+MIN_VOLUME_24H = 1000000
+MAX_VOLUME_CANDIDATES = 150
+MAX_VOLUME_ALERTS = 30
+
+# ATH HISTORY
 MAX_HISTORY_PAGES = 24
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V8",
+    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V9",
     "Accept": "application/json",
     "Origin": "https://gmgn.ai",
     "Referer": "https://gmgn.ai/"
 })
 
+PAIR_CACHE = {}
 
-# ==========================================
+
+# ==================================================
 # HELPERS
-# ==========================================
+# ==================================================
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -151,9 +159,25 @@ def save_state(state):
     os.replace(temp_file, STATE_FILE)
 
 
-# ==========================================
+def get_filter_record(state, filter_name, address):
+    key = f"{filter_name}:{address}"
+
+    if key in state:
+        return key, state[key]
+
+    # Keep old ATH alerts from previous versions.
+    if filter_name == "ath" and address in state:
+        old = state[address]
+
+        if isinstance(old, dict):
+            return key, old
+
+    return key, {}
+
+
+# ==================================================
 # DISCOVERY - DEXSCREENER
-# ==========================================
+# ==================================================
 
 def discover_dex():
     endpoints = [
@@ -189,9 +213,9 @@ def discover_dex():
     return found
 
 
-# ==========================================
+# ==================================================
 # DISCOVERY - GMGN
-# ==========================================
+# ==================================================
 
 def discover_gmgn():
     found = {}
@@ -244,7 +268,7 @@ def discover_tokens():
     combined = {}
 
     for address, item in dex.items():
-        combined[address] = item
+        combined[address] = item.copy()
 
     for address, item in gmgn.items():
         if address in combined:
@@ -252,26 +276,27 @@ def discover_tokens():
                 "GMGN + DexScreener"
             )
         else:
-            combined[address] = item
+            combined[address] = item.copy()
 
     result = list(combined.values())
 
     print("UNIQUE TOKENS:", len(result))
+    return result
 
-    return result[:MAX_CANDIDATES]
 
+# ==================================================
+# TOKEN PAIRS
+# ==================================================
 
-# ==========================================
-# TOKEN PAIRS AND MARKET CAP
-# ==========================================
+def get_token_pairs(address):
+    if address in PAIR_CACHE:
+        return PAIR_CACHE[address]
 
-def get_best_pair(address):
     url = f"{DEX}/token-pairs/v1/{CHAIN}/{address}"
-
     pairs = get_json(url)
 
-    if not isinstance(pairs, list) or not pairs:
-        return None
+    if not isinstance(pairs, list):
+        pairs = []
 
     valid = []
 
@@ -290,16 +315,27 @@ def get_best_pair(address):
         if not pair.get("pairAddress"):
             continue
 
-        price = number(pair.get("priceUsd"))
-        market_cap = number(pair.get("marketCap"))
-        liquidity = number(
-            (pair.get("liquidity") or {}).get("usd")
-        )
-
-        # Do not substitute FDV for market cap.
-        if price <= 0:
+        if number(pair.get("priceUsd")) <= 0:
             continue
 
+        valid.append(pair)
+
+    PAIR_CACHE[address] = valid
+    return valid
+
+
+# ==================================================
+# FILTER 1: BEST PAIR FOR ATH
+# ==================================================
+
+def get_best_pair_for_ath(address):
+    pairs = get_token_pairs(address)
+    valid = []
+
+    for pair in pairs:
+        market_cap = number(pair.get("marketCap"))
+
+        # Market cap only. Never substitute FDV.
         if market_cap < MIN_MARKET_CAP:
             continue
 
@@ -318,9 +354,91 @@ def get_best_pair(address):
     return valid[0]
 
 
-# ==========================================
-# HISTORICAL POOL ATH - GECKOTERMINAL
-# ==========================================
+# ==================================================
+# FILTER 2: OLD POOL + HIGH VOLUME
+# ==================================================
+
+def get_volume_candidate(address):
+    pairs = get_token_pairs(address)
+
+    current_time = time.time()
+    eligible = []
+
+    for pair in pairs:
+        created = number(pair.get("pairCreatedAt"))
+
+        if created <= 0:
+            continue
+
+        created_seconds = created / 1000
+        age_days = (
+            current_time - created_seconds
+        ) / 86400
+
+        # Accept pool age as the age reference.
+        if age_days <= MIN_POOL_AGE_DAYS:
+            continue
+
+        volume = number(
+            (pair.get("volume") or {}).get("h24")
+        )
+
+        if volume <= 0:
+            continue
+
+        eligible.append({
+            "pair": pair,
+            "age_days": age_days,
+            "volume": volume
+        })
+
+    if not eligible:
+        return None
+
+    # Aggregate 24H volume across eligible older pools.
+    total_volume = sum(
+        item["volume"] for item in eligible
+    )
+
+    if total_volume < MIN_VOLUME_24H:
+        return None
+
+    # Main display pair: highest liquidity.
+    eligible.sort(
+        key=lambda item: number(
+            (item["pair"].get("liquidity") or {}).get("usd")
+        ),
+        reverse=True
+    )
+
+    main = eligible[0]
+    pair = main["pair"]
+    base = pair.get("baseToken") or {}
+
+    # Report the oldest qualifying pool age.
+    oldest_age = max(
+        item["age_days"] for item in eligible
+    )
+
+    return {
+        "name": base.get("name", "Unknown"),
+        "symbol": base.get("symbol", "N/A"),
+        "address": address,
+        "price": number(pair.get("priceUsd")),
+        "market_cap": number(pair.get("marketCap")),
+        "liquidity": number(
+            (pair.get("liquidity") or {}).get("usd")
+        ),
+        "volume": total_volume,
+        "pool_age_days": oldest_age,
+        "pair_address": pair.get("pairAddress"),
+        "eligible_pools": len(eligible)
+    }
+
+
+# ==================================================
+# GECKOTERMINAL: HISTORICAL POOL ATH
+# ==================================================
 
 def get_ath(pair_address, pair_created_at):
     url = (
@@ -388,9 +506,7 @@ def get_ath(pair_address, pair_created_at):
             if timestamp <= 0:
                 continue
 
-            if high > highest:
-                highest = high
-
+            highest = max(highest, high)
             timestamps.append(timestamp)
 
         if not timestamps:
@@ -399,7 +515,6 @@ def get_ath(pair_address, pair_created_at):
         oldest = min(timestamps)
         oldest_seen = oldest
 
-        # Reached the pool creation period.
         if oldest <= created_seconds:
             break
 
@@ -409,7 +524,6 @@ def get_ath(pair_address, pair_created_at):
             break
 
         before = next_before
-
         time.sleep(0.3)
 
     complete = (
@@ -427,12 +541,12 @@ def get_ath(pair_address, pair_created_at):
     }
 
 
-# ==========================================
-# ANALYSIS
-# ==========================================
+# ==================================================
+# FILTER 1: ATH ANALYSIS
+# ==================================================
 
-def analyze_token(address):
-    pair = get_best_pair(address)
+def analyze_ath_token(address):
+    pair = get_best_pair_for_ath(address)
 
     if not pair:
         return None
@@ -453,16 +567,10 @@ def analyze_token(address):
 
     pair_address = pair.get("pairAddress")
 
-    history = get_ath(
-        pair_address,
-        created
-    )
+    history = get_ath(pair_address, created)
 
-    if not history:
-        return None
-
-    if not history["complete"]:
-        print("INCOMPLETE HISTORY:", address)
+    if not history or not history["complete"]:
+        print("INCOMPLETE ATH HISTORY:", address)
         return None
 
     ath = history["ath"]
@@ -476,6 +584,11 @@ def analyze_token(address):
         return None
 
     base = pair.get("baseToken") or {}
+
+    age_hours = max(
+        0,
+        (time.time() - number(created) / 1000) / 3600
+    )
 
     return {
         "name": base.get("name", "Unknown"),
@@ -491,25 +604,20 @@ def analyze_token(address):
         "volume": number(
             (pair.get("volume") or {}).get("h24")
         ),
-        "created": created,
+        "age_hours": age_hours,
         "candles": history["candles"],
         "pages": history["pages"],
         "pair_address": pair_address
     }
 
 
-# ==========================================
-# TELEGRAM MESSAGE
-# ==========================================
+# ==================================================
+# MESSAGE 1: ATH ALERT
+# ==================================================
 
-def make_message(item, source):
-    age_hours = max(
-        0,
-        (time.time() - number(item["created"]) / 1000) / 3600
-    )
-
+def make_ath_message(item, source):
     return (
-        "🎯 DEX HUNTER V8\n"
+        "🎯 DEX HUNTER V9\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🚨 SOLANA POOL ATH ALERT\n"
         "🚨 هشدار فاصله از سقف استخر سولانا\n\n"
@@ -524,18 +632,18 @@ def make_message(item, source):
         f"💰 مارکت‌کپ: ${fa(item['market_cap'])}\n"
         f"💧 نقدینگی: ${fa(item['liquidity'])}\n"
         f"📊 حجم ۲۴ ساعته: ${fa(item['volume'])}\n"
-        f"⏳ عمر استخر: {fa(age_hours, 1)} ساعت\n"
+        f"⏳ عمر استخر: {fa(item['age_hours'], 1)} ساعت\n"
         "✅ مارکت‌کپ حداقل ۵۰۰ هزار دلار است.\n"
-        "✅ فاصله از سقف حداقل ۷۰ درصد است.\n\n"
+        "✅ افت از ATH حداقل ۷۰ درصد است.\n\n"
 
         "🇬🇧 ENGLISH ANALYSIS\n"
-        f"🔻 Drawdown from pool ATH: {item['drop']:.2f}%\n"
+        f"🔻 Pool ATH drawdown: {item['drop']:.2f}%\n"
         f"🏔 Pool historical high: ${item['ath']:.12g}\n"
         f"💵 Current price: ${item['price']:.12g}\n"
         f"💰 Market cap: ${item['market_cap']:,.2f}\n"
         f"💧 Liquidity: ${item['liquidity']:,.2f}\n"
         f"📊 24H Volume: ${item['volume']:,.2f}\n"
-        f"⏳ Pool age: {age_hours:.1f} hours\n\n"
+        f"⏳ Pool age: {item['age_hours']:.1f} hours\n\n"
 
         "📚 HISTORY VERIFICATION\n"
         f"Candles checked: {item['candles']}\n"
@@ -548,16 +656,243 @@ def make_message(item, source):
         "🔗 Chart:\n"
         f"https://dexscreener.com/solana/{item['pair_address']}\n\n"
 
-        "⚠️ سقف محاسبه‌شده مربوط به همین استخر است، نه لزوماً تمام استخرهای توکن.\n"
-        "⚠️ ATH shown is for this pool, not necessarily every market for this token.\n"
-        "⚠️ افت قیمت به‌تنهایی به معنی فرصت خرید نیست.\n"
+        "⚠️ سقف محاسبه‌شده مربوط به همین استخر است، نه تمام بازارهای توکن.\n"
+        "⚠️ ATH applies to this pool, not necessarily all token markets.\n"
+        "⚠️ افت قیمت به‌تنهایی سیگنال خرید نیست.\n"
         "⚠️ A large drawdown alone is not a buy signal."
     )
 
 
-# ==========================================
-# MAIN SCANNER
-# ==========================================
+# ==================================================
+# MESSAGE 2: HIGH VOLUME ALERT
+# ==================================================
+
+def make_volume_message(item, source):
+    return (
+        "🎯 DEX HUNTER V9\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🟣 SOLANA HIGH VOLUME ALERT\n"
+        "🟣 هشدار توکن‌های قدیمی با حجم بالا\n\n"
+
+        f"🪙 {item['name']} ({item['symbol']})\n"
+        f"📍 Discovery: {source}\n\n"
+
+        "🇮🇷 تحلیل فارسی\n"
+        f"📊 حجم معاملات ۲۴ ساعته: ${fa(item['volume'])}\n"
+        f"⏳ سن استخر معاملاتی: {fa(item['pool_age_days'], 1)} روز\n"
+        f"💵 قیمت فعلی: ${item['price']:.12g}\n"
+        f"💧 نقدینگی: ${fa(item['liquidity'])}\n"
+        f"💰 مارکت‌کپ: ${fa(item['market_cap'])}\n"
+        f"🔗 تعداد استخرهای واجد شرایط: {fa(item['eligible_pools'], 0)}\n\n"
+
+        "✅ سن استخر بیشتر از ۷ روز است.\n"
+        "✅ حجم ۲۴ ساعته حداقل یک میلیون دلار است.\n"
+        "ℹ️ مارکت‌کپ و افت از سقف، شرط این فیلتر نیستند.\n\n"
+
+        "🇬🇧 ENGLISH ANALYSIS\n"
+        f"📊 24H Trading Volume: ${item['volume']:,.2f}\n"
+        f"⏳ Trading pool age: {item['pool_age_days']:.1f} days\n"
+        f"💵 Current price: ${item['price']:.12g}\n"
+        f"💧 Liquidity: ${item['liquidity']:,.2f}\n"
+        f"💰 Market cap: ${item['market_cap']:,.2f}\n"
+        f"🔗 Eligible pools: {item['eligible_pools']}\n\n"
+
+        "📍 Contract:\n"
+        f"{item['address']}\n\n"
+
+        "🔗 Chart:\n"
+        f"https://dexscreener.com/solana/{item['pair_address']}\n\n"
+
+        "⚠️ سن اعلام‌شده، سن استخر معاملاتی است؛ نه زمان دقیق ساخت توکن.\n"
+        "⚠️ Pool age is not necessarily the token creation date.\n"
+        "⚠️ حجم بالا به‌تنهایی سیگنال خرید نیست.\n"
+        "⚠️ High volume alone is not a buy signal."
+    )
+
+
+# ==================================================
+# INDEPENDENT ALERT DELIVERY
+# ==================================================
+
+def deliver_alert(state, filter_name, address, message, details):
+    key, old = get_filter_record(
+        state,
+        filter_name,
+        address
+    )
+
+    if old.get("alerted"):
+        return False
+
+    sent_to = old.get("sent_to", [])
+
+    if not isinstance(sent_to, list):
+        sent_to = []
+
+    for chat_id in CHAT_IDS:
+        if chat_id in sent_to:
+            continue
+
+        if post_one_chat(chat_id, message):
+            sent_to.append(chat_id)
+
+            state[key] = {
+                "alerted": False,
+                "sent_to": sent_to,
+                "details": details,
+                "date": now()
+            }
+
+            save_state(state)
+
+        time.sleep(0.3)
+
+    if all(chat_id in sent_to for chat_id in CHAT_IDS):
+        state[key] = {
+            "alerted": True,
+            "sent_to": sent_to,
+            "details": details,
+            "date": now()
+        }
+
+        save_state(state)
+
+        print(
+            "ALERT COMPLETED:",
+            filter_name,
+            address
+        )
+
+        return True
+
+    state[key] = {
+        "alerted": False,
+        "sent_to": sent_to,
+        "details": details,
+        "date": now()
+    }
+
+    save_state(state)
+    return False
+
+
+# ==================================================
+# FILTER 1 SCANNER
+# ==================================================
+
+def scan_ath(candidates, state):
+    alerts = 0
+    checked = 0
+
+    print("\n========== ATH SCANNER ==========")
+
+    for candidate in candidates[:MAX_ATH_CANDIDATES]:
+        address = candidate["address"]
+        source = candidate["source"]
+
+        key, old = get_filter_record(
+            state, "ath", address
+        )
+
+        if old.get("alerted"):
+            continue
+
+        try:
+            checked += 1
+            result = analyze_ath_token(address)
+
+            if not result:
+                continue
+
+            message = make_ath_message(result, source)
+
+            if deliver_alert(
+                state,
+                "ath",
+                address,
+                message,
+                {
+                    "ath": result["ath"],
+                    "drop": result["drop"],
+                    "market_cap": result["market_cap"]
+                }
+            ):
+                alerts += 1
+
+            if alerts >= MAX_ATH_ALERTS:
+                break
+
+            time.sleep(0.5)
+
+        except Exception as error:
+            print("ATH TOKEN ERROR:", address, error)
+
+    print(
+        "ATH FINISHED | "
+        f"Checked: {checked} | Alerts: {alerts}"
+    )
+
+
+# ==================================================
+# FILTER 2 SCANNER
+# ==================================================
+
+def scan_volume(candidates, state):
+    alerts = 0
+    checked = 0
+
+    print("\n========== HIGH VOLUME SCANNER ==========")
+
+    for candidate in candidates[:MAX_VOLUME_CANDIDATES]:
+        address = candidate["address"]
+        source = candidate["source"]
+
+        key, old = get_filter_record(
+            state, "volume", address
+        )
+
+        if old.get("alerted"):
+            continue
+
+        try:
+            checked += 1
+
+            result = get_volume_candidate(address)
+
+            if not result:
+                continue
+
+            message = make_volume_message(result, source)
+
+            if deliver_alert(
+                state,
+                "volume",
+                address,
+                message,
+                {
+                    "volume_24h": result["volume"],
+                    "pool_age_days": result["pool_age_days"]
+                }
+            ):
+                alerts += 1
+
+            if alerts >= MAX_VOLUME_ALERTS:
+                break
+
+            time.sleep(0.3)
+
+        except Exception as error:
+            print("VOLUME TOKEN ERROR:", address, error)
+
+    print(
+        "VOLUME FINISHED | "
+        f"Checked: {checked} | Alerts: {alerts}"
+    )
+
+
+# ==================================================
+# MAIN
+# ==================================================
 
 def scan():
     if not BOT_TOKEN:
@@ -565,83 +900,27 @@ def scan():
             "TELEGRAM_BOT_TOKEN is missing"
         )
 
+    global PAIR_CACHE
+    PAIR_CACHE = {}
+
     state = load_state()
+
     candidates = discover_tokens()
 
-    alerts = 0
+    print("\nTOTAL CANDIDATES:", len(candidates))
 
-    for candidate in candidates:
-        address = candidate["address"]
-        source = candidate["source"]
+    # Both scanners use the same discovery list,
+    # but their rules and alert states are independent.
 
-        old = state.get(address, {})
-
-        # Old V7 alerts remain ignored.
-        if old.get("alerted"):
-            continue
-
-        try:
-            result = analyze_token(address)
-
-            if not result:
-                continue
-
-            message = make_message(result, source)
-
-            sent_to = old.get("sent_to", [])
-
-            if not isinstance(sent_to, list):
-                sent_to = []
-
-            # Retry only recipients who did not receive it.
-            for chat_id in CHAT_IDS:
-                if chat_id in sent_to:
-                    continue
-
-                if post_one_chat(chat_id, message):
-                    sent_to.append(chat_id)
-
-                    state[address] = {
-                        "alerted": False,
-                        "sent_to": sent_to,
-                        "ath": result["ath"],
-                        "price": result["price"],
-                        "drop": result["drop"],
-                        "market_cap": result["market_cap"],
-                        "date": now()
-                    }
-
-                    save_state(state)
-
-                time.sleep(0.3)
-
-            if all(chat_id in sent_to for chat_id in CHAT_IDS):
-                state[address]["alerted"] = True
-                state[address]["date"] = now()
-                save_state(state)
-
-                alerts += 1
-                print("ALERT COMPLETED:", address)
-
-            if alerts >= MAX_ALERTS:
-                break
-
-            time.sleep(0.5)
-
-        except Exception as error:
-            print(
-                "TOKEN ERROR:",
-                address,
-                str(error)
-            )
+    scan_ath(candidates, state)
+    scan_volume(candidates, state)
 
     save_state(state)
 
-    print(
-        "DEX HUNTER V8 FINISHED | "
-        f"Candidates: {len(candidates)} | "
-        f"Alerts: {alerts}"
-    )
+    print("\n================================")
+    print("DEX HUNTER V9 FINISHED")
+    print("ATH and HIGH VOLUME SCANNERS DONE")
+    print("================================")
 
 
 if __name__ == "__main__":
