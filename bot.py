@@ -5,9 +5,9 @@ import time
 import requests
 from datetime import datetime, timezone
 
-# =====================================
-# DEX HUNTER V7 - ATH DROP SCANNER
-# =====================================
+# ==========================================
+# DEX HUNTER V8 - SOLANA POOL ATH SCANNER
+# ==========================================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -22,25 +22,32 @@ DEX = "https://api.dexscreener.com"
 GECKO = "https://api.geckoterminal.com/api/v2"
 GMGN = "https://gmgn.ai"
 
-STATE_FILE = "seen_tokens.json"
-
-DROP_THRESHOLD = 75
-MAX_CANDIDATES = 35
-MAX_ALERTS = 20
-MAX_HISTORY_PAGES = 12
-
-# Only Solana
 CHAIN = "solana"
 GMGN_CHAIN = "sol"
 
+STATE_FILE = "seen_tokens.json"
+
+# New filters
+DROP_THRESHOLD = 70
+MIN_MARKET_CAP = 500000
+
+# Scanner limits
+MAX_CANDIDATES = 35
+MAX_ALERTS = 20
+MAX_HISTORY_PAGES = 24
+
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V7",
+    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V8",
     "Accept": "application/json",
     "Origin": "https://gmgn.ai",
     "Referer": "https://gmgn.ai/"
 })
 
+
+# ==========================================
+# HELPERS
+# ==========================================
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -63,56 +70,60 @@ def fa(value, decimals=2):
         return str(value)
 
 
-def get_json(url, params=None, timeout=20):
-    try:
-        response = session.get(
-            url,
-            params=params,
-            timeout=timeout
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as error:
-        print("API ERROR:", url, str(error))
-        return None
+def get_json(url, params=None, timeout=25):
+    for attempt in range(3):
+        try:
+            response = session.get(
+                url,
+                params=params,
+                timeout=timeout
+            )
+
+            if response.status_code == 429:
+                wait = number(
+                    response.headers.get("Retry-After")
+                ) or (5 * (attempt + 1))
+
+                print("RATE LIMIT:", wait)
+                time.sleep(min(wait, 30))
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except Exception as error:
+            print("API ERROR:", url, str(error))
+            time.sleep(attempt + 1)
+
+    return None
 
 
-def post_telegram(message):
+def post_one_chat(chat_id, message):
     if not BOT_TOKEN:
-        print("BOT TOKEN MISSING")
         return False
-
-    success = 0
 
     url = (
         f"https://api.telegram.org/"
         f"bot{BOT_TOKEN}/sendMessage"
     )
 
-    for chat_id in CHAT_IDS:
-        try:
-            response = session.post(
-                url,
-                data={
-                    "chat_id": chat_id,
-                    "text": message,
-                    "disable_web_page_preview": True
-                },
-                timeout=20
-            )
+    try:
+        response = session.post(
+            url,
+            data={
+                "chat_id": chat_id,
+                "text": message,
+                "disable_web_page_preview": True
+            },
+            timeout=20
+        )
 
-            response.raise_for_status()
+        response.raise_for_status()
+        return response.json().get("ok", False)
 
-            if response.json().get("ok"):
-                success += 1
-                print("SENT:", chat_id)
-
-        except Exception as error:
-            print("SEND ERROR:", chat_id, error)
-
-    print(f"DELIVERY: {success}/{len(CHAT_IDS)}")
-
-    return success == len(CHAT_IDS)
+    except Exception as error:
+        print("TELEGRAM ERROR:", chat_id, error)
+        return False
 
 
 def load_state():
@@ -127,13 +138,22 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    temp_file = STATE_FILE + ".tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(
+            state,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(temp_file, STATE_FILE)
 
 
-# =====================================
-# DISCOVERY: DEXSCREENER
-# =====================================
+# ==========================================
+# DISCOVERY - DEXSCREENER
+# ==========================================
 
 def discover_dex():
     endpoints = [
@@ -165,13 +185,13 @@ def discover_dex():
                     "source": "DexScreener"
                 }
 
-    print("DEX tokens:", len(found))
+    print("DEX TOKENS:", len(found))
     return found
 
 
-# =====================================
-# DISCOVERY: GMGN
-# =====================================
+# ==========================================
+# DISCOVERY - GMGN
+# ==========================================
 
 def discover_gmgn():
     found = {}
@@ -190,7 +210,7 @@ def discover_gmgn():
     data = get_json(url, params=params)
 
     if not isinstance(data, dict):
-        print("GMGN unavailable")
+        print("GMGN UNAVAILABLE")
         return found
 
     inner = data.get("data") or {}
@@ -213,7 +233,7 @@ def discover_gmgn():
                     "source": "GMGN"
                 }
 
-    print("GMGN tokens:", len(found))
+    print("GMGN TOKENS:", len(found))
     return found
 
 
@@ -228,20 +248,22 @@ def discover_tokens():
 
     for address, item in gmgn.items():
         if address in combined:
-            combined[address]["source"] = "GMGN + DexScreener"
+            combined[address]["source"] = (
+                "GMGN + DexScreener"
+            )
         else:
             combined[address] = item
 
     result = list(combined.values())
 
-    print("TOTAL UNIQUE TOKENS:", len(result))
+    print("UNIQUE TOKENS:", len(result))
 
     return result[:MAX_CANDIDATES]
 
 
-# =====================================
-# TOKEN PAIRS
-# =====================================
+# ==========================================
+# TOKEN PAIRS AND MARKET CAP
+# ==========================================
 
 def get_best_pair(address):
     url = f"{DEX}/token-pairs/v1/{CHAIN}/{address}"
@@ -251,12 +273,37 @@ def get_best_pair(address):
     if not isinstance(pairs, list) or not pairs:
         return None
 
-    valid = [
-        p for p in pairs
-        if p.get("chainId") == CHAIN
-        and p.get("baseToken", {}).get("address") == address
-        and p.get("pairAddress")
-    ]
+    valid = []
+
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+
+        if pair.get("chainId") != CHAIN:
+            continue
+
+        base = pair.get("baseToken") or {}
+
+        if base.get("address") != address:
+            continue
+
+        if not pair.get("pairAddress"):
+            continue
+
+        price = number(pair.get("priceUsd"))
+        market_cap = number(pair.get("marketCap"))
+        liquidity = number(
+            (pair.get("liquidity") or {}).get("usd")
+        )
+
+        # Do not substitute FDV for market cap.
+        if price <= 0:
+            continue
+
+        if market_cap < MIN_MARKET_CAP:
+            continue
+
+        valid.append(pair)
 
     if not valid:
         return None
@@ -271,10 +318,9 @@ def get_best_pair(address):
     return valid[0]
 
 
-# =====================================
-# HISTORICAL ATH
-# GeckoTerminal OHLCV
-# =====================================
+# ==========================================
+# HISTORICAL POOL ATH - GECKOTERMINAL
+# ==========================================
 
 def get_ath(pair_address, pair_created_at):
     url = (
@@ -282,13 +328,16 @@ def get_ath(pair_address, pair_created_at):
         f"pools/{pair_address}/ohlcv/hour"
     )
 
+    created_seconds = number(pair_created_at) / 1000
+
+    if created_seconds <= 0:
+        return None
+
     before = None
     highest = 0
     oldest_seen = None
     pages = 0
     candles_found = 0
-
-    created_seconds = number(pair_created_at) / 1000
 
     while pages < MAX_HISTORY_PAGES:
         params = {
@@ -299,10 +348,14 @@ def get_ath(pair_address, pair_created_at):
             "include_empty_intervals": "false"
         }
 
-        if before:
+        if before is not None:
             params["before_timestamp"] = before
 
-        data = get_json(url, params=params, timeout=30)
+        data = get_json(
+            url,
+            params=params,
+            timeout=30
+        )
 
         if not isinstance(data, dict):
             break
@@ -323,11 +376,17 @@ def get_ath(pair_address, pair_created_at):
         timestamps = []
 
         for candle in candles:
-            if not isinstance(candle, list) or len(candle) < 3:
+            if not isinstance(candle, list):
+                continue
+
+            if len(candle) < 3:
                 continue
 
             timestamp = number(candle[0])
             high = number(candle[2])
+
+            if timestamp <= 0:
+                continue
 
             if high > highest:
                 highest = high
@@ -340,7 +399,8 @@ def get_ath(pair_address, pair_created_at):
         oldest = min(timestamps)
         oldest_seen = oldest
 
-        if created_seconds and oldest <= created_seconds:
+        # Reached the pool creation period.
+        if oldest <= created_seconds:
             break
 
         next_before = int(oldest) - 1
@@ -350,12 +410,12 @@ def get_ath(pair_address, pair_created_at):
 
         before = next_before
 
-        time.sleep(0.25)
+        time.sleep(0.3)
 
     complete = (
-        bool(created_seconds)
-        and bool(oldest_seen)
+        oldest_seen is not None
         and oldest_seen <= created_seconds
+        and highest > 0
     )
 
     return {
@@ -367,9 +427,9 @@ def get_ath(pair_address, pair_created_at):
     }
 
 
-# =====================================
+# ==========================================
 # ANALYSIS
-# =====================================
+# ==========================================
 
 def analyze_token(address):
     pair = get_best_pair(address)
@@ -378,8 +438,12 @@ def analyze_token(address):
         return None
 
     current_price = number(pair.get("priceUsd"))
+    market_cap = number(pair.get("marketCap"))
 
     if current_price <= 0:
+        return None
+
+    if market_cap < MIN_MARKET_CAP:
         return None
 
     created = pair.get("pairCreatedAt")
@@ -387,10 +451,19 @@ def analyze_token(address):
     if not created:
         return None
 
+    pair_address = pair.get("pairAddress")
+
     history = get_ath(
-        pair.get("pairAddress"),
+        pair_address,
         created
     )
+
+    if not history:
+        return None
+
+    if not history["complete"]:
+        print("INCOMPLETE HISTORY:", address)
+        return None
 
     ath = history["ath"]
 
@@ -399,14 +472,19 @@ def analyze_token(address):
 
     drop = ((ath - current_price) / ath) * 100
 
+    if drop < DROP_THRESHOLD:
+        return None
+
+    base = pair.get("baseToken") or {}
+
     return {
-        "pair": pair,
-        "name": pair.get("baseToken", {}).get("name", "Unknown"),
-        "symbol": pair.get("baseToken", {}).get("symbol", "N/A"),
+        "name": base.get("name", "Unknown"),
+        "symbol": base.get("symbol", "N/A"),
         "address": address,
         "price": current_price,
         "ath": ath,
         "drop": drop,
+        "market_cap": market_cap,
         "liquidity": number(
             (pair.get("liquidity") or {}).get("usd")
         ),
@@ -414,17 +492,15 @@ def analyze_token(address):
             (pair.get("volume") or {}).get("h24")
         ),
         "created": created,
-        "history_complete": history["complete"],
         "candles": history["candles"],
         "pages": history["pages"],
-        "pair_address": pair.get("pairAddress"),
-        "dex_url": pair.get("url")
+        "pair_address": pair_address
     }
 
 
-# =====================================
-# MESSAGE
-# =====================================
+# ==========================================
+# TELEGRAM MESSAGE
+# ==========================================
 
 def make_message(item, source):
     age_hours = max(
@@ -432,62 +508,62 @@ def make_message(item, source):
         (time.time() - number(item["created"]) / 1000) / 3600
     )
 
-    drop = item["drop"]
-
-    message = (
-        "🎯 DEX HUNTER V7\n"
-        "━━━━━━━━━━━━━━━━\n"
-        "🚨 ATH DROP ALERT | هشدار ریزش از سقف\n\n"
+    return (
+        "🎯 DEX HUNTER V8\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🚨 SOLANA POOL ATH ALERT\n"
+        "🚨 هشدار فاصله از سقف استخر سولانا\n\n"
 
         f"🪙 {item['name']} ({item['symbol']})\n"
-        f"📍 منبع کشف | Discovery: {source}\n\n"
+        f"📍 Discovery: {source}\n\n"
 
         "🇮🇷 تحلیل فارسی\n"
-        f"🔻 ریزش از سقف تاریخی: {fa(drop)}٪\n"
-        f"🏔 بالاترین قیمت ثبت‌شده: ${item['ath']}\n"
-        f"💵 قیمت فعلی: ${item['price']}\n"
+        f"🔻 فاصله از سقف استخر: {fa(item['drop'])}٪\n"
+        f"🏔 سقف تاریخی استخر: ${item['ath']:.12g}\n"
+        f"💵 قیمت فعلی: ${item['price']:.12g}\n"
+        f"💰 مارکت‌کپ: ${fa(item['market_cap'])}\n"
         f"💧 نقدینگی: ${fa(item['liquidity'])}\n"
         f"📊 حجم ۲۴ ساعته: ${fa(item['volume'])}\n"
         f"⏳ عمر استخر: {fa(age_hours, 1)} ساعت\n"
-        "✅ شرط ریزش ۷۵٪ یا بیشتر برقرار است.\n\n"
+        "✅ مارکت‌کپ حداقل ۵۰۰ هزار دلار است.\n"
+        "✅ فاصله از سقف حداقل ۷۰ درصد است.\n\n"
 
-        "🇬🇧 English Analysis\n"
-        f"🔻 Drawdown from ATH: {drop:.2f}%\n"
-        f"🏔 Historical high: ${item['ath']}\n"
-        f"💵 Current price: ${item['price']}\n"
+        "🇬🇧 ENGLISH ANALYSIS\n"
+        f"🔻 Drawdown from pool ATH: {item['drop']:.2f}%\n"
+        f"🏔 Pool historical high: ${item['ath']:.12g}\n"
+        f"💵 Current price: ${item['price']:.12g}\n"
+        f"💰 Market cap: ${item['market_cap']:,.2f}\n"
         f"💧 Liquidity: ${item['liquidity']:,.2f}\n"
         f"📊 24H Volume: ${item['volume']:,.2f}\n"
-        f"⏳ Pool age: {age_hours:.1f} hours\n"
-        "✅ The 75% or greater drawdown condition is met.\n\n"
+        f"⏳ Pool age: {age_hours:.1f} hours\n\n"
 
-        "📚 بررسی تاریخچه | History Check\n"
-        f"کندل‌های بررسی‌شده | Candles: {item['candles']}\n"
-        f"صفحات تاریخچه | Pages: {item['pages']}\n"
-        f"تاریخچه کامل | Full history: "
-        f"{'بله / Yes' if item['history_complete'] else 'خیر / No'}\n\n"
+        "📚 HISTORY VERIFICATION\n"
+        f"Candles checked: {item['candles']}\n"
+        f"History pages: {item['pages']}\n"
+        "History status: COMPLETE TO POOL CREATION\n\n"
 
-        "📍 قرارداد | Contract:\n"
+        "📍 Contract:\n"
         f"{item['address']}\n\n"
 
-        "🔗 نمودار | Chart:\n"
+        "🔗 Chart:\n"
         f"https://dexscreener.com/solana/{item['pair_address']}\n\n"
 
-        "⚠️ ریزش زیاد به معنی فرصت خرید نیست.\n"
-        "⚠️ A large drawdown does not mean a buying opportunity.\n"
-        "⚠️ اگر تاریخچه کامل نباشد، سقف محاسبه‌شده ممکن است سقف واقعی نباشد.\n"
-        "⚠️ If history is incomplete, the calculated high may not be the true ATH."
+        "⚠️ سقف محاسبه‌شده مربوط به همین استخر است، نه لزوماً تمام استخرهای توکن.\n"
+        "⚠️ ATH shown is for this pool, not necessarily every market for this token.\n"
+        "⚠️ افت قیمت به‌تنهایی به معنی فرصت خرید نیست.\n"
+        "⚠️ A large drawdown alone is not a buy signal."
     )
 
-    return message
 
-
-# =====================================
+# ==========================================
 # MAIN SCANNER
-# =====================================
+# ==========================================
 
 def scan():
     if not BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing"
+        )
 
     state = load_state()
     candidates = discover_tokens()
@@ -498,42 +574,54 @@ def scan():
         address = candidate["address"]
         source = candidate["source"]
 
+        old = state.get(address, {})
+
+        # Old V7 alerts remain ignored.
+        if old.get("alerted"):
+            continue
+
         try:
             result = analyze_token(address)
 
             if not result:
                 continue
 
-            if result["drop"] < DROP_THRESHOLD:
-                continue
-
-            # Never claim a true lifetime ATH
-            # if historical candles are incomplete.
-            if not result["history_complete"]:
-                print("INCOMPLETE HISTORY:", address)
-                continue
-
-            old = state.get(address, {})
-
-            # Send once per token
-            if old.get("alerted"):
-                continue
-
             message = make_message(result, source)
 
-            delivered = post_telegram(message)
+            sent_to = old.get("sent_to", [])
 
-            if delivered:
-                state[address] = {
-                    "alerted": True,
-                    "ath": result["ath"],
-                    "price": result["price"],
-                    "drop": result["drop"],
-                    "date": now()
-                }
+            if not isinstance(sent_to, list):
+                sent_to = []
 
+            # Retry only recipients who did not receive it.
+            for chat_id in CHAT_IDS:
+                if chat_id in sent_to:
+                    continue
+
+                if post_one_chat(chat_id, message):
+                    sent_to.append(chat_id)
+
+                    state[address] = {
+                        "alerted": False,
+                        "sent_to": sent_to,
+                        "ath": result["ath"],
+                        "price": result["price"],
+                        "drop": result["drop"],
+                        "market_cap": result["market_cap"],
+                        "date": now()
+                    }
+
+                    save_state(state)
+
+                time.sleep(0.3)
+
+            if all(chat_id in sent_to for chat_id in CHAT_IDS):
+                state[address]["alerted"] = True
+                state[address]["date"] = now()
                 save_state(state)
+
                 alerts += 1
+                print("ALERT COMPLETED:", address)
 
             if alerts >= MAX_ALERTS:
                 break
@@ -541,12 +629,16 @@ def scan():
             time.sleep(0.5)
 
         except Exception as error:
-            print("TOKEN ERROR:", address, str(error))
+            print(
+                "TOKEN ERROR:",
+                address,
+                str(error)
+            )
 
     save_state(state)
 
     print(
-        "DEX HUNTER V7 FINISHED | "
+        "DEX HUNTER V8 FINISHED | "
         f"Candidates: {len(candidates)} | "
         f"Alerts: {alerts}"
     )
