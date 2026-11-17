@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone
 
 # ==================================================
-# DEX HUNTER V9 - TWO INDEPENDENT SOLANA SCANNERS
+# DEX HUNTER V10 - TWO INDEPENDENT SOLANA SCANNERS
 # ==================================================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -28,23 +28,23 @@ GMGN_CHAIN = "sol"
 STATE_FILE = "seen_tokens.json"
 
 # FILTER 1: ATH DROP
-DROP_THRESHOLD = 70
-MIN_MARKET_CAP = 500000
-MAX_ATH_CANDIDATES = 35
-MAX_ATH_ALERTS = 20
+DROP_THRESHOLD = 50
+MIN_MARKET_CAP = 100000
+MAX_ATH_CANDIDATES = 120
+MAX_ATH_ALERTS = 30
 
 # FILTER 2: OLD POOL + HIGH VOLUME
-MIN_POOL_AGE_DAYS = 7
-MIN_VOLUME_24H = 1000000
-MAX_VOLUME_CANDIDATES = 150
-MAX_VOLUME_ALERTS = 30
+MIN_POOL_AGE_DAYS = 3
+MIN_VOLUME_24H = 300000
+MAX_VOLUME_CANDIDATES = 250
+MAX_VOLUME_ALERTS = 50
 
 # ATH HISTORY
 MAX_HISTORY_PAGES = 24
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V9",
+    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V10",
     "Accept": "application/json",
     "Origin": "https://gmgn.ai",
     "Referer": "https://gmgn.ai/"
@@ -165,7 +165,7 @@ def get_filter_record(state, filter_name, address):
     if key in state:
         return key, state[key]
 
-    # Keep old ATH alerts from previous versions.
+    # Preserve old ATH alerts from previous versions.
     if filter_name == "ath" and address in state:
         old = state[address]
 
@@ -375,7 +375,6 @@ def get_volume_candidate(address):
             current_time - created_seconds
         ) / 86400
 
-        # Accept pool age as the age reference.
         if age_days <= MIN_POOL_AGE_DAYS:
             continue
 
@@ -395,7 +394,6 @@ def get_volume_candidate(address):
     if not eligible:
         return None
 
-    # Aggregate 24H volume across eligible older pools.
     total_volume = sum(
         item["volume"] for item in eligible
     )
@@ -403,7 +401,6 @@ def get_volume_candidate(address):
     if total_volume < MIN_VOLUME_24H:
         return None
 
-    # Main display pair: highest liquidity.
     eligible.sort(
         key=lambda item: number(
             (item["pair"].get("liquidity") or {}).get("usd")
@@ -415,7 +412,6 @@ def get_volume_candidate(address):
     pair = main["pair"]
     base = pair.get("baseToken") or {}
 
-    # Report the oldest qualifying pool age.
     oldest_age = max(
         item["age_days"] for item in eligible
     )
@@ -617,7 +613,7 @@ def analyze_ath_token(address):
 
 def make_ath_message(item, source):
     return (
-        "🎯 DEX HUNTER V9\n"
+        "🎯 DEX HUNTER V10\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🚨 SOLANA POOL ATH ALERT\n"
         "🚨 هشدار فاصله از سقف استخر سولانا\n\n"
@@ -633,8 +629,8 @@ def make_ath_message(item, source):
         f"💧 نقدینگی: ${fa(item['liquidity'])}\n"
         f"📊 حجم ۲۴ ساعته: ${fa(item['volume'])}\n"
         f"⏳ عمر استخر: {fa(item['age_hours'], 1)} ساعت\n"
-        "✅ مارکت‌کپ حداقل ۵۰۰ هزار دلار است.\n"
-        "✅ افت از ATH حداقل ۷۰ درصد است.\n\n"
+        "✅ مارکت‌کپ حداقل ۱۰۰ هزار دلار است.\n"
+        "✅ افت از ATH حداقل ۵۰ درصد است.\n\n"
 
         "🇬🇧 ENGLISH ANALYSIS\n"
         f"🔻 Pool ATH drawdown: {item['drop']:.2f}%\n"
@@ -669,7 +665,7 @@ def make_ath_message(item, source):
 
 def make_volume_message(item, source):
     return (
-        "🎯 DEX HUNTER V9\n"
+        "🎯 DEX HUNTER V10\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🟣 SOLANA HIGH VOLUME ALERT\n"
         "🟣 هشدار توکن‌های قدیمی با حجم بالا\n\n"
@@ -685,8 +681,8 @@ def make_volume_message(item, source):
         f"💰 مارکت‌کپ: ${fa(item['market_cap'])}\n"
         f"🔗 تعداد استخرهای واجد شرایط: {fa(item['eligible_pools'], 0)}\n\n"
 
-        "✅ سن استخر بیشتر از ۷ روز است.\n"
-        "✅ حجم ۲۴ ساعته حداقل یک میلیون دلار است.\n"
+        "✅ سن استخر بیشتر از ۳ روز است.\n"
+        "✅ حجم ۲۴ ساعته حداقل ۳۰۰ هزار دلار است.\n"
         "ℹ️ مارکت‌کپ و افت از سقف، شرط این فیلتر نیستند.\n\n"
 
         "🇬🇧 ENGLISH ANALYSIS\n"
@@ -799,6 +795,7 @@ def scan_ath(candidates, state):
 
         try:
             checked += 1
+
             result = analyze_ath_token(address)
 
             if not result:
@@ -909,16 +906,13 @@ def scan():
 
     print("\nTOTAL CANDIDATES:", len(candidates))
 
-    # Both scanners use the same discovery list,
-    # but their rules and alert states are independent.
-
     scan_ath(candidates, state)
     scan_volume(candidates, state)
 
     save_state(state)
 
     print("\n================================")
-    print("DEX HUNTER V9 FINISHED")
+    print("DEX HUNTER V10 FINISHED")
     print("ATH and HIGH VOLUME SCANNERS DONE")
     print("================================")
 
