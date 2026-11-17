@@ -1,8 +1,10 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V10
+DEX HUNTER V11
+
 Four sources:
 1. DexScreener
 2. GeckoTerminal
@@ -10,8 +12,14 @@ Four sources:
 4. Stonk.fun
 
 Independent filters:
-A) Market cap >= $500,000 AND price >=70% below observed ATH
-B) Token age >7 days AND 24h volume >= $1,000,000
+
+A) ATH:
+   Market cap >= $150,000
+   Price >= 50% below observed ATH
+
+B) Volume:
+   Token age > 3 days
+   24h volume >= $300,000
 
 Alerts only. No automatic trading.
 """
@@ -41,11 +49,13 @@ CHAT_IDS = [
     "1012061523",
 ]
 
-ATH_MIN_MARKET_CAP_USD = 500_000
-ATH_MIN_DROP_PERCENT = 70.0
+# V11 FILTER SETTINGS
 
-VOLUME_MIN_AGE_DAYS = 7
-VOLUME_MIN_24H_USD = 1_000_000
+ATH_MIN_MARKET_CAP_USD = 150_000
+ATH_MIN_DROP_PERCENT = 50.0
+
+VOLUME_MIN_AGE_DAYS = 3
+VOLUME_MIN_24H_USD = 300_000
 
 STATE_FILE = Path("seen.json")
 
@@ -59,7 +69,7 @@ PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V10/1.0",
+    "User-Agent": "DEX-HUNTER-V11/1.0",
     "Accept": "application/json",
 }
 
@@ -879,7 +889,7 @@ def volume_filter(store: dict, state: dict) -> int:
         )
 
         message = (
-            "🔥 شکار حجم معاملات | DEX HUNTER V10\n"
+            "🔥 شکار حجم معاملات | DEX HUNTER V11\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"⏳ عمر توکن: {age:.1f} روز\n"
@@ -888,7 +898,7 @@ def volume_filter(store: dict, state: dict) -> int:
             f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
             f"🧾 قرارداد: {mint}\n"
             f"📈 نمودار: {url}\n"
-            "✅ شرط فیلتر دوم: عمر بالای ۷ روز + حجم ۲۴ ساعته حداقل ۱ میلیون دلار\n"
+            "✅ شرط فیلتر دوم: عمر بالای ۳ روز + حجم ۲۴ ساعته حداقل ۳۰۰ هزار دلار\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید. نقدینگی و ریسک قرارداد را بررسی کن."
         )
 
@@ -972,8 +982,8 @@ def ath_filter(store: dict, state: dict) -> int:
         ) * 100.0
 
         # Independent filter:
-        # Market cap >= $500,000
-        # Price >=70% below observed ATH.
+        # Market cap >= $150,000
+        # Price >=50% below observed ATH.
 
         if drop < ATH_MIN_DROP_PERCENT:
             continue
@@ -984,7 +994,7 @@ def ath_filter(store: dict, state: dict) -> int:
         )
 
         message = (
-            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V10\n"
+            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V11\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"💰 قیمت فعلی: ${price:.10g}\n"
@@ -995,7 +1005,7 @@ def ath_filter(store: dict, state: dict) -> int:
             f"🧾 قرارداد: {mint}\n"
             f"📈 نمودار: {url}\n"
             f"ℹ️ {note}\n"
-            "✅ شرط فیلتر اول: مارکت‌کپ حداقل ۵۰۰ هزار دلار + افت حداقل ۷۰٪ از ATH تأییدشده\n"
+            "✅ شرط فیلتر اول: مارکت‌کپ حداقل ۱۵۰ هزار دلار + افت حداقل ۵۰٪ از ATH تأییدشده\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید. نقدینگی و ریسک قرارداد را بررسی کن."
         )
 
@@ -1028,7 +1038,7 @@ def main():
 
     candidates = {}
 
-    logging.info("DEX HUNTER V10 scan started")
+    logging.info("DEX HUNTER V11 scan started")
 
     # Four sources are scanned independently.
     source_dexscreener(candidates)
