@@ -1,1 +1,85 @@
-{}
+{
+  "ath:6MjDb45kzriv6cpW6oaDjZGw1rujmpA185dHcvZzpump": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "ath": 0.0018819710877011479,
+      "drop": 79.06450303222904,
+      "market_cap": 392263.0
+    },
+    "date": "2026-11-17T19:59:07.327771+00:00"
+  },
+  "ath:F4vEFNoH9H2oLYRabaQQ2Z6jAAi2AhRVdTdVH6Nn2J1q": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "ath": 0.00043885390503227217,
+      "drop": 54.74575987072612,
+      "market_cap": 191739.0
+    },
+    "date": "2026-11-17T19:59:30.969519+00:00"
+  },
+  "ath:FVzqGqRmr4UH1Fif6dewmwbJ1p4YUZCu8dcw4Efopump": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "ath": 0.0014419665483832982,
+      "drop": 58.06421441066184,
+      "market_cap": 577778.0
+    },
+    "date": "2026-11-17T20:00:39.623329+00:00"
+  },
+  "ath:BWJfBNeXpapG7uoqByp5KSwWgCQba8QcDmA2DQiEpump": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "ath": 0.0008564172935986058,
+      "drop": 50.74830889651635,
+      "market_cap": 409507.0
+    },
+    "date": "2026-11-17T20:01:33.452184+00:00"
+  },
+  "ath:9jhs5qoJnUFU7AZXbsiD1Q6De6FVsino9Ysw8QU6pump": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "ath": 0.0005989808088023156,
+      "drop": 68.31284121113794,
+      "market_cap": 189129.0
+    },
+    "date": "2026-11-17T20:01:41.139257+00:00"
+  },
+  "volume:9QT8K685Hrae4k11dhGXirdtpfAaimExtyfwt8cPpump": {
+    "alerted": false,
+    "sent_to": [
+      "6665909136",
+      "98529959",
+      "1507608801"
+    ],
+    "details": {
+      "volume_24h": 950291.55,
+      "pool_age_days": 20.3120923030404
+    },
+    "date": "2026-11-17T20:02:16.637575+00:00"
+  }
+}
