@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V11
+DEX HUNTER V12
 
 Four sources:
 1. DexScreener
@@ -14,12 +14,19 @@ Four sources:
 Independent filters:
 
 A) ATH:
-   Market cap >= $150,000
-   Price >= 50% below observed ATH
+   Market cap >= $50,000
+   Price >= 30% below observed ATH
 
 B) Volume:
-   Token age > 3 days
-   24h volume >= $300,000
+   Token/pool age > 1 day
+   24h volume >= $100,000
+
+Improvements:
+- Better timestamp extraction
+- Pool age fallback for volume filter
+- Better volume data collection
+- More ATH checks per run
+- Preserve previous sent state
 
 Alerts only. No automatic trading.
 """
@@ -28,7 +35,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,18 +56,18 @@ CHAT_IDS = [
     "1012061523",
 ]
 
-# V11 FILTER SETTINGS
+# V12 FILTER SETTINGS
 
-ATH_MIN_MARKET_CAP_USD = 150_000
-ATH_MIN_DROP_PERCENT = 50.0
+ATH_MIN_MARKET_CAP_USD = 50_000
+ATH_MIN_DROP_PERCENT = 30.0
 
-VOLUME_MIN_AGE_DAYS = 3
-VOLUME_MIN_24H_USD = 300_000
+VOLUME_MIN_AGE_DAYS = 1
+VOLUME_MIN_24H_USD = 100_000
 
 STATE_FILE = Path("seen.json")
 
 MAX_SOURCE_ROWS = 100
-MAX_ATH_CHECKS_PER_RUN = 2
+MAX_ATH_CHECKS_PER_RUN = 5
 HTTP_TIMEOUT = 20
 
 DEX = "https://api.dexscreener.com"
@@ -69,7 +76,7 @@ PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V11/1.0",
+    "User-Agent": "DEX-HUNTER-V12/1.0",
     "Accept": "application/json",
 }
 
@@ -132,9 +139,46 @@ def first(*values):
     return None
 
 
+def parse_timestamp(value: Any) -> Optional[float]:
+
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, str):
+
+        try:
+            parsed = datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return parsed.timestamp()
+
+        except ValueError:
+            pass
+
+    result = as_float(value)
+
+    if result is None or result <= 0:
+        return None
+
+    if result > 10_000_000_000:
+        result /= 1000.0
+
+    return result
+
+
 def rows_from(payload: Any) -> list:
+
     if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
+        return [
+            x for x in payload
+            if isinstance(x, dict)
+        ]
 
     if not isinstance(payload, dict):
         return []
@@ -147,12 +191,17 @@ def rows_from(payload: Any) -> list:
         "pools",
         "data",
     ):
+
         value = payload.get(key)
 
         if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
+            return [
+                x for x in value
+                if isinstance(x, dict)
+            ]
 
         if isinstance(value, dict):
+
             for nested in (
                 "tokens",
                 "coins",
@@ -160,6 +209,7 @@ def rows_from(payload: Any) -> list:
                 "results",
                 "pools",
             ):
+
                 inner = value.get(nested)
 
                 if isinstance(inner, list):
@@ -172,6 +222,7 @@ def rows_from(payload: Any) -> list:
 
 
 def mint_looks_valid(mint: Any) -> bool:
+
     return (
         isinstance(mint, str)
         and 32 <= len(mint) <= 44
@@ -183,7 +234,9 @@ def mint_looks_valid(mint: Any) -> bool:
 # ==================================================
 
 def load_state() -> dict:
+
     if not STATE_FILE.exists():
+
         return {
             "sent": {
                 "ath": [],
@@ -193,6 +246,7 @@ def load_state() -> dict:
         }
 
     try:
+
         state = json.loads(
             STATE_FILE.read_text(encoding="utf-8")
         )
@@ -205,6 +259,7 @@ def load_state() -> dict:
         return state
 
     except Exception:
+
         logging.exception("Could not read seen.json")
 
         return {
@@ -217,6 +272,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+
     temp = STATE_FILE.with_suffix(".tmp")
 
     temp.write_text(
@@ -293,30 +349,44 @@ def normalize(row: dict, source: str) -> Optional[dict]:
         row.get("createdAt"),
         row.get("created_at"),
         row.get("createdAtUnix"),
+        row.get("creation_timestamp"),
+        row.get("launch_timestamp"),
+        row.get("timestamp"),
         attrs.get("created_timestamp"),
         attrs.get("created_at"),
+        attrs.get("pool_created_at"),
+        attrs.get("creation_timestamp"),
     )
 
-    created_ts = None
+    created_ts = parse_timestamp(created)
 
-    if isinstance(created, str):
-        try:
-            created_ts = datetime.fromisoformat(
-                created.replace("Z", "+00:00")
-            ).timestamp()
-        except ValueError:
-            created_ts = None
-    else:
-        created_ts = as_float(created)
+    pair_created = parse_timestamp(first(
+        row.get("pairCreatedAt"),
+        row.get("pair_created_at"),
+        attrs.get("pair_created_at"),
+        attrs.get("pool_created_at"),
+        attrs.get("created_at"),
+    ))
 
-        if created_ts and created_ts > 10_000_000_000:
-            created_ts /= 1000.0
-
-    volume_data = (
-        attrs.get("volume_usd")
-        if isinstance(attrs.get("volume_usd"), dict)
-        else {}
+    volume_data = first(
+        attrs.get("volume_usd"),
+        row.get("volume"),
+        row.get("volume_usd"),
+        {},
     )
+
+    if not isinstance(volume_data, dict):
+        volume_data = {}
+
+    volume_24h = as_float(first(
+        row.get("volume24h"),
+        row.get("volume_24h"),
+        row.get("volume24hUsd"),
+        row.get("volume_24h_usd"),
+        row.get("volumeUsd24h"),
+        volume_data.get("h24"),
+        volume_data.get("24h"),
+    ))
 
     return {
         "mint": mint,
@@ -353,25 +423,22 @@ def normalize(row: dict, source: str) -> Optional[dict]:
             attrs.get("market_cap_usd"),
         )),
 
-        "volume_24h": as_float(first(
-            row.get("volume24h"),
-            row.get("volume_24h"),
-            row.get("volume24hUsd"),
-            row.get("volume_24h_usd"),
-            volume_data.get("h24"),
-        )),
+        "volume_24h": volume_24h,
 
         "created_ts": created_ts,
-        "pair_created_ts": None,
+        "pair_created_ts": pair_created,
+
         "dex_url": first(
             row.get("url"),
             attrs.get("url"),
         ),
+
         "liquidity": 0.0,
     }
 
 
 def add_candidate(store: dict, candidate: Optional[dict]) -> None:
+
     if not candidate:
         return
 
@@ -382,6 +449,7 @@ def add_candidate(store: dict, candidate: Optional[dict]) -> None:
         return
 
     old = store[mint]
+
     old["sources"].update(candidate["sources"])
 
     for field in (
@@ -389,15 +457,25 @@ def add_candidate(store: dict, candidate: Optional[dict]) -> None:
         "symbol",
         "price",
         "market_cap",
-        "volume_24h",
         "created_ts",
+        "pair_created_ts",
         "dex_url",
     ):
+
         if (
             old.get(field) is None
             or old.get(field) in ("Unknown", "???")
         ) and candidate.get(field) is not None:
+
             old[field] = candidate[field]
+
+    new_volume = candidate.get("volume_24h")
+    old_volume = old.get("volume_24h")
+
+    if new_volume is not None:
+
+        if old_volume is None or new_volume > old_volume:
+            old["volume_24h"] = new_volume
 
 
 # ==================================================
@@ -430,6 +508,7 @@ def source_dexscreener(store: dict) -> None:
             mint = row.get("tokenAddress")
 
             if mint_looks_valid(mint):
+
                 add_candidate(
                     store,
                     normalize(
@@ -487,6 +566,9 @@ def source_geckoterminal(store: dict) -> None:
                     "mint": mint,
                     "name": attrs.get("name"),
                     "price_usd": attrs.get("base_token_price_usd"),
+                    "created_at": attrs.get("pool_created_at"),
+                    "volume": attrs.get("volume_usd"),
+                    "url": attrs.get("url"),
                 },
                 "GeckoTerminal",
             )
@@ -510,6 +592,7 @@ def source_pump_fun(store: dict) -> None:
     )
 
     for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
+
         add_candidate(
             store,
             normalize(row, "Pump.fun"),
@@ -532,6 +615,7 @@ def source_stonk_fun(store: dict) -> None:
     )
 
     for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
+
         add_candidate(
             store,
             normalize(row, "Stonk.fun"),
@@ -589,6 +673,34 @@ def enrich_from_dexscreener(store: dict) -> None:
                 ) or 0.0
             )
 
+            pair_volume = as_float(
+                (pair.get("volume") or {}).get("h24")
+            )
+
+            if pair_volume is not None:
+
+                old_volume = candidate.get("volume_24h")
+
+                if old_volume is None or pair_volume > old_volume:
+                    candidate["volume_24h"] = pair_volume
+
+            pair_created = parse_timestamp(
+                pair.get("pairCreatedAt")
+            )
+
+            if pair_created:
+
+                old_pair_created = candidate.get(
+                    "pair_created_ts"
+                )
+
+                if (
+                    old_pair_created is None
+                    or pair_created < old_pair_created
+                ):
+
+                    candidate["pair_created_ts"] = pair_created
+
             if liquidity >= candidate.get("liquidity", 0):
 
                 candidate["liquidity"] = liquidity
@@ -603,22 +715,6 @@ def enrich_from_dexscreener(store: dict) -> None:
                     or as_float(pair.get("fdv"))
                     or candidate.get("market_cap")
                 )
-
-                candidate["volume_24h"] = (
-                    as_float(
-                        (pair.get("volume") or {}).get("h24")
-                    )
-                    or candidate.get("volume_24h")
-                )
-
-                pair_created = as_float(
-                    pair.get("pairCreatedAt")
-                )
-
-                if pair_created and pair_created > 10_000_000_000:
-                    pair_created /= 1000.0
-
-                candidate["pair_created_ts"] = pair_created
 
                 candidate["dex_url"] = (
                     pair.get("url")
@@ -676,8 +772,10 @@ def gecko_best_pool(mint: str):
 
         if mint == base_mint:
             side = "base"
+
         elif mint == quote_mint:
             side = "quote"
+
         else:
             continue
 
@@ -687,6 +785,7 @@ def gecko_best_pool(mint: str):
         )
 
         if pool_address and liquidity > best_liquidity:
+
             best_pool = pool_address
             best_side = side
             best_liquidity = liquidity
@@ -700,7 +799,7 @@ def observed_ath(
 ):
 
     if not created_ts:
-        return None, "زمان ایجاد توکن مشخص نیست"
+        return None, "زمان واقعی ایجاد توکن مشخص نیست"
 
     age_days = (
         time.time() - created_ts
@@ -725,8 +824,11 @@ def observed_ath(
     )
 
     try:
+
         candles = payload["data"]["attributes"]["ohlcv_list"]
+
     except Exception:
+
         return None, "داده کندل روزانه در دسترس نیست"
 
     highs = []
@@ -740,13 +842,16 @@ def observed_ath(
             high = as_float(candle[2])
 
             if ts and high and high > 0:
+
                 candle_times.append(ts)
                 highs.append(high)
 
     if not highs or not candle_times:
+
         return None, "کندل معتبر برای محاسبه ATH وجود ندارد"
 
     if min(candle_times) > created_ts + 36 * 3600:
+
         return None, "تاریخچه از ابتدای عمر توکن شروع نمی‌شود"
 
     return (
@@ -762,6 +867,7 @@ def observed_ath(
 def send_telegram(chat_id: str, message: str) -> bool:
 
     if not BOT_TOKEN:
+
         logging.error("TELEGRAM_BOT_TOKEN is missing")
         return False
 
@@ -835,17 +941,35 @@ def deliver(
 # FILTER 2: VOLUME SCANNER
 # ==================================================
 
-def token_age_days(candidate: dict) -> Optional[float]:
+def token_age_info(candidate: dict):
 
+    # Prefer actual token creation time.
     created = candidate.get("created_ts")
 
-    if not created:
-        return None
+    if created:
 
-    return max(
-        0.0,
-        (time.time() - created) / 86400.0,
-    )
+        age = max(
+            0.0,
+            (time.time() - created) / 86400.0,
+        )
+
+        return age, "زمان ایجاد توکن"
+
+    # Fallback: earliest known pool creation time.
+    # This is an estimate, not confirmed token age.
+
+    pair_created = candidate.get("pair_created_ts")
+
+    if pair_created:
+
+        age = max(
+            0.0,
+            (time.time() - pair_created) / 86400.0,
+        )
+
+        return age, "عمر تخمینی بر اساس زمان ایجاد استخر"
+
+    return None, None
 
 
 def volume_filter(store: dict, state: dict) -> int:
@@ -854,7 +978,8 @@ def volume_filter(store: dict, state: dict) -> int:
 
     for candidate in store.values():
 
-        age = token_age_days(candidate)
+        age, age_note = token_age_info(candidate)
+
         volume = candidate.get("volume_24h")
 
         # Independent filter:
@@ -889,16 +1014,17 @@ def volume_filter(store: dict, state: dict) -> int:
         )
 
         message = (
-            "🔥 شکار حجم معاملات | DEX HUNTER V11\n"
+            "🔥 شکار حجم معاملات | DEX HUNTER V12\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
-            f"⏳ عمر توکن: {age:.1f} روز\n"
+            f"⏳ عمر: {age:.1f} روز\n"
+            f"🕒 مبنای عمر: {age_note}\n"
             f"📦 حجم معاملات ۲۴ ساعته: ${volume:,.0f}\n"
             f"📊 مارکت‌کپ: {market_cap_text}\n"
             f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
             f"🧾 قرارداد: {mint}\n"
             f"📈 نمودار: {url}\n"
-            "✅ شرط فیلتر دوم: عمر بالای ۳ روز + حجم ۲۴ ساعته حداقل ۳۰۰ هزار دلار\n"
+            "✅ شرط فیلتر دوم: عمر بالای ۱ روز + حجم ۲۴ ساعته حداقل ۱۰۰ هزار دلار\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید. نقدینگی و ریسک قرارداد را بررسی کن."
         )
 
@@ -982,8 +1108,8 @@ def ath_filter(store: dict, state: dict) -> int:
         ) * 100.0
 
         # Independent filter:
-        # Market cap >= $150,000
-        # Price >=50% below observed ATH.
+        # Market cap >= $50,000
+        # Price >=30% below observed ATH.
 
         if drop < ATH_MIN_DROP_PERCENT:
             continue
@@ -994,7 +1120,7 @@ def ath_filter(store: dict, state: dict) -> int:
         )
 
         message = (
-            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V11\n"
+            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V12\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"💰 قیمت فعلی: ${price:.10g}\n"
@@ -1005,7 +1131,7 @@ def ath_filter(store: dict, state: dict) -> int:
             f"🧾 قرارداد: {mint}\n"
             f"📈 نمودار: {url}\n"
             f"ℹ️ {note}\n"
-            "✅ شرط فیلتر اول: مارکت‌کپ حداقل ۱۵۰ هزار دلار + افت حداقل ۵۰٪ از ATH تأییدشده\n"
+            "✅ شرط فیلتر اول: مارکت‌کپ حداقل ۵۰ هزار دلار + افت حداقل ۳۰٪ از ATH مشاهده‌شده\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید. نقدینگی و ریسک قرارداد را بررسی کن."
         )
 
@@ -1030,6 +1156,7 @@ def ath_filter(store: dict, state: dict) -> int:
 def main():
 
     if not BOT_TOKEN:
+
         raise SystemExit(
             "Missing GitHub Secret: TELEGRAM_BOT_TOKEN"
         )
@@ -1038,7 +1165,7 @@ def main():
 
     candidates = {}
 
-    logging.info("DEX HUNTER V11 scan started")
+    logging.info("DEX HUNTER V12 scan started")
 
     # Four sources are scanned independently.
     source_dexscreener(candidates)
@@ -1052,6 +1179,29 @@ def main():
     )
 
     enrich_from_dexscreener(candidates)
+
+    # Count data availability for diagnostics.
+    with_age = sum(
+        1 for c in candidates.values()
+        if token_age_info(c)[0] is not None
+    )
+
+    with_volume = sum(
+        1 for c in candidates.values()
+        if c.get("volume_24h") is not None
+    )
+
+    with_market_cap = sum(
+        1 for c in candidates.values()
+        if c.get("market_cap") is not None
+    )
+
+    logging.info(
+        "Data coverage | age=%d | volume=%d | market_cap=%d",
+        with_age,
+        with_volume,
+        with_market_cap,
+    )
 
     # The two filters are independent.
     volume_count = volume_filter(
@@ -1067,8 +1217,11 @@ def main():
     save_state(state)
 
     logging.info(
-        "Scan complete | tokens=%d | volume=%d | ath=%d",
+        "Scan complete | tokens=%d | age_data=%d | volume_data=%d | market_cap_data=%d | volume=%d | ath=%d",
         len(candidates),
+        with_age,
+        with_volume,
+        with_market_cap,
         volume_count,
         ath_count,
     )
