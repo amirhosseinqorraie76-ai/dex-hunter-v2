@@ -5,12 +5,11 @@ import time
 import requests
 from datetime import datetime, timezone
 
-# =========================
-# DEX HUNTER V6.3
-# Persian + English
-# =========================
+# =====================================
+# DEX HUNTER V7 - ATH DROP SCANNER
+# =====================================
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 CHAT_IDS = [
     "6665909136",
@@ -20,45 +19,57 @@ CHAT_IDS = [
 ]
 
 DEX = "https://api.dexscreener.com"
-RUG = "https://api.rugcheck.xyz/v1/tokens"
+GECKO = "https://api.geckoterminal.com/api/v2"
+GMGN = "https://gmgn.ai"
+
 STATE_FILE = "seen_tokens.json"
 
+DROP_THRESHOLD = 75
+MAX_CANDIDATES = 35
 MAX_ALERTS = 20
-MAX_CANDIDATES = 65
-MAX_SECURITY_CHECKS = 8
+MAX_HISTORY_PAGES = 12
 
-MIN_LIQ_EARLY = 2500
-MIN_LIQ_PREPUMP = 4000
-MIN_LIQ_MOMENTUM = 5000
-
-MIN_SCORE_EARLY = 26
-MIN_SCORE_PREPUMP = 34
-MIN_SCORE_MOMENTUM = 40
+# Only Solana
+CHAIN = "solana"
+GMGN_CHAIN = "sol"
 
 session = requests.Session()
-session.headers.update({"User-Agent": "DEX-Hunter-V6.3"})
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 DEX-HUNTER-V7",
+    "Accept": "application/json",
+    "Origin": "https://gmgn.ai",
+    "Referer": "https://gmgn.ai/"
+})
 
 
-def num(value):
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def number(value):
     try:
         return float(value or 0)
     except (ValueError, TypeError):
         return 0.0
 
 
-def fa(value, decimals=0):
+def fa(value, decimals=2):
     try:
         result = f"{float(value):,.{decimals}f}"
         return result.translate(str.maketrans(
             "0123456789", "۰۱۲۳۴۵۶۷۸۹"
         ))
-    except (ValueError, TypeError):
+    except Exception:
         return str(value)
 
 
-def get_json(url, timeout=18):
+def get_json(url, params=None, timeout=20):
     try:
-        response = session.get(url, timeout=timeout)
+        response = session.get(
+            url,
+            params=params,
+            timeout=timeout
+        )
         response.raise_for_status()
         return response.json()
     except Exception as error:
@@ -66,13 +77,17 @@ def get_json(url, timeout=18):
         return None
 
 
-def send_telegram(message):
+def post_telegram(message):
     if not BOT_TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN is missing")
+        print("BOT TOKEN MISSING")
         return False
 
-    success_count = 0
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    success = 0
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
 
     for chat_id in CHAT_IDS:
         try:
@@ -87,60 +102,43 @@ def send_telegram(message):
             )
 
             response.raise_for_status()
-            result = response.json()
 
-            if result.get("ok"):
-                success_count += 1
-                print("Telegram sent:", chat_id)
-            else:
-                print("Telegram rejected:", chat_id, result)
+            if response.json().get("ok"):
+                success += 1
+                print("SENT:", chat_id)
 
         except Exception as error:
-            print("Telegram error:", chat_id, str(error))
+            print("SEND ERROR:", chat_id, error)
 
-    print(f"Telegram delivery: {success_count}/{len(CHAT_IDS)}")
-    return success_count == len(CHAT_IDS)
+    print(f"DELIVERY: {success}/{len(CHAT_IDS)}")
+
+    return success == len(CHAT_IDS)
 
 
 def load_state():
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            raw = json.load(file)
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-        if not isinstance(raw, dict):
-            return {}
-
-        clean = {}
-
-        for address, value in raw.items():
-            if isinstance(value, dict):
-                clean[address] = value
-            else:
-                clean[address] = {
-                    "sent": True,
-                    "score": 0,
-                    "volume": 0
-                }
-
-        return clean
+        return data if isinstance(data, dict) else {}
 
     except Exception:
         return {}
 
 
 def save_state(state):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as file:
-            json.dump(state, file, ensure_ascii=False)
-    except Exception as error:
-        print("STATE SAVE ERROR:", str(error))
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def discover_tokens():
+# =====================================
+# DISCOVERY: DEXSCREENER
+# =====================================
+
+def discover_dex():
     endpoints = [
         "/token-profiles/latest/v1",
         "/token-boosts/latest/v1",
-        "/token-boosts/top/v1",
         "/community-takeovers/latest/v1"
     ]
 
@@ -156,328 +154,336 @@ def discover_tokens():
             if not isinstance(item, dict):
                 continue
 
-            if item.get("chainId") != "solana":
+            if item.get("chainId") != CHAIN:
                 continue
 
             address = item.get("tokenAddress")
 
             if address:
-                found[address] = item
+                found[address] = {
+                    "address": address,
+                    "source": "DexScreener"
+                }
 
-    print("Discovered:", len(found))
-    return list(found.items())[:MAX_CANDIDATES]
+    print("DEX tokens:", len(found))
+    return found
 
 
-def analyze(pair):
-    liquidity = num((pair.get("liquidity") or {}).get("usd"))
+# =====================================
+# DISCOVERY: GMGN
+# =====================================
 
-    volume = pair.get("volume") or {}
-    v5 = num(volume.get("m5"))
-    v1 = num(volume.get("h1"))
+def discover_gmgn():
+    found = {}
 
-    txns = pair.get("txns") or {}
-    t5 = txns.get("m5") or {}
-    t1 = txns.get("h1") or {}
+    url = (
+        f"{GMGN}/defi/quotation/v1/"
+        f"rank/{GMGN_CHAIN}/swaps/1h"
+    )
 
-    buys5 = num(t5.get("buys"))
-    sells5 = num(t5.get("sells"))
-    buys1 = num(t1.get("buys"))
-    sells1 = num(t1.get("sells"))
+    params = {
+        "orderby": "open_timestamp",
+        "direction": "desc",
+        "limit": 100
+    }
 
-    total1 = buys1 + sells1
-    ratio = buys1 / max(sells1, 1)
+    data = get_json(url, params=params)
 
-    changes = pair.get("priceChange") or {}
-    c5 = num(changes.get("m5"))
-    c1 = num(changes.get("h1"))
+    if not isinstance(data, dict):
+        print("GMGN unavailable")
+        return found
 
-    fdv = num(pair.get("fdv"))
-    created = pair.get("pairCreatedAt")
+    inner = data.get("data") or {}
+    rows = inner.get("rank") or inner.get("list") or []
 
-    age = None
+    if isinstance(rows, list):
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
 
-    if created:
-        age = max(
-            0,
-            (datetime.now(timezone.utc).timestamp()
-             - num(created) / 1000) / 3600
+            address = (
+                item.get("address")
+                or item.get("token_address")
+                or item.get("tokenAddress")
+            )
+
+            if address:
+                found[address] = {
+                    "address": address,
+                    "source": "GMGN"
+                }
+
+    print("GMGN tokens:", len(found))
+    return found
+
+
+def discover_tokens():
+    dex = discover_dex()
+    gmgn = discover_gmgn()
+
+    combined = {}
+
+    for address, item in dex.items():
+        combined[address] = item
+
+    for address, item in gmgn.items():
+        if address in combined:
+            combined[address]["source"] = "GMGN + DexScreener"
+        else:
+            combined[address] = item
+
+    result = list(combined.values())
+
+    print("TOTAL UNIQUE TOKENS:", len(result))
+
+    return result[:MAX_CANDIDATES]
+
+
+# =====================================
+# TOKEN PAIRS
+# =====================================
+
+def get_best_pair(address):
+    url = f"{DEX}/token-pairs/v1/{CHAIN}/{address}"
+
+    pairs = get_json(url)
+
+    if not isinstance(pairs, list) or not pairs:
+        return None
+
+    valid = [
+        p for p in pairs
+        if p.get("chainId") == CHAIN
+        and p.get("baseToken", {}).get("address") == address
+        and p.get("pairAddress")
+    ]
+
+    if not valid:
+        return None
+
+    valid.sort(
+        key=lambda p: number(
+            (p.get("liquidity") or {}).get("usd")
+        ),
+        reverse=True
+    )
+
+    return valid[0]
+
+
+# =====================================
+# HISTORICAL ATH
+# GeckoTerminal OHLCV
+# =====================================
+
+def get_ath(pair_address, pair_created_at):
+    url = (
+        f"{GECKO}/networks/{CHAIN}/"
+        f"pools/{pair_address}/ohlcv/hour"
+    )
+
+    before = None
+    highest = 0
+    oldest_seen = None
+    pages = 0
+    candles_found = 0
+
+    created_seconds = number(pair_created_at) / 1000
+
+    while pages < MAX_HISTORY_PAGES:
+        params = {
+            "aggregate": 1,
+            "limit": 1000,
+            "currency": "usd",
+            "token": "base",
+            "include_empty_intervals": "false"
+        }
+
+        if before:
+            params["before_timestamp"] = before
+
+        data = get_json(url, params=params, timeout=30)
+
+        if not isinstance(data, dict):
+            break
+
+        attributes = (
+            data.get("data", {})
+            .get("attributes", {})
         )
 
-    score = 0
+        candles = attributes.get("ohlcv_list") or []
 
-    if liquidity >= 50000:
-        score += 15
-    elif liquidity >= 15000:
-        score += 12
-    elif liquidity >= 5000:
-        score += 9
-    elif liquidity >= 2500:
-        score += 5
+        if not candles:
+            break
 
-    if v1 >= 50000:
-        score += 15
-    elif v1 >= 10000:
-        score += 12
-    elif v1 >= 1000:
-        score += 8
-    elif v1 >= 300:
-        score += 4
+        pages += 1
+        candles_found += len(candles)
 
-    if total1 >= 200:
-        score += 15
-    elif total1 >= 50:
-        score += 12
-    elif total1 >= 10:
-        score += 8
-    elif total1 >= 3:
-        score += 4
+        timestamps = []
 
-    if ratio >= 2:
-        score += 15
-    elif ratio >= 1.5:
-        score += 12
-    elif ratio >= 1:
-        score += 8
-    else:
-        score -= 8
+        for candle in candles:
+            if not isinstance(candle, list) or len(candle) < 3:
+                continue
 
-    if 0 < c5 <= 10:
-        score += 8
-    elif c5 > 10:
-        score += 5
-    elif c5 < -5:
-        score -= 5
+            timestamp = number(candle[0])
+            high = number(candle[2])
 
-    if 3 <= c1 <= 30:
-        score += 10
-    elif 30 < c1 <= 60:
-        score += 6
-    elif c1 > 100:
-        score -= 15
-    elif c1 < -10:
-        score -= 8
+            if high > highest:
+                highest = high
 
-    if age is not None:
-        if age <= 6:
-            score += 10
-        elif age <= 24:
-            score += 8
-        elif age <= 72:
-            score += 4
+            timestamps.append(timestamp)
 
-    if fdv and liquidity and fdv / liquidity > 40:
-        score -= 8
+        if not timestamps:
+            break
 
-    if liquidity and v1 / liquidity > 15:
-        score -= 5
+        oldest = min(timestamps)
+        oldest_seen = oldest
 
-    score = max(0, min(100, score))
+        if created_seconds and oldest <= created_seconds:
+            break
+
+        next_before = int(oldest) - 1
+
+        if before == next_before:
+            break
+
+        before = next_before
+
+        time.sleep(0.25)
+
+    complete = (
+        bool(created_seconds)
+        and bool(oldest_seen)
+        and oldest_seen <= created_seconds
+    )
 
     return {
-        "score": score,
-        "liquidity": liquidity,
-        "volume": v1,
-        "volume5": v5,
-        "buys": buys1,
-        "sells": sells1,
-        "buys5": buys5,
-        "sells5": sells5,
-        "ratio": ratio,
-        "change": c1,
-        "change5": c5,
-        "age": age,
-        "price": pair.get("priceUsd", "Unknown")
+        "ath": highest,
+        "candles": candles_found,
+        "pages": pages,
+        "complete": complete,
+        "oldest": oldest_seen
     }
 
 
-def security_check(address):
-    data = get_json(f"{RUG}/{address}/report", timeout=15)
+# =====================================
+# ANALYSIS
+# =====================================
 
-    if not isinstance(data, dict):
-        return (
-            "گزارش امنیت دریافت نشد | Security report unavailable",
-            [
-                "⚠️ امنیت تأیید نشده است | Security not verified"
-            ]
-        )
+def analyze_token(address):
+    pair = get_best_pair(address)
 
-    warnings = []
+    if not pair:
+        return None
 
-    token = data.get("token") or {}
-    mint = data.get("mintAuthority") or token.get("mintAuthority")
-    freeze = data.get("freezeAuthority") or token.get("freezeAuthority")
+    current_price = number(pair.get("priceUsd"))
 
-    if mint:
-        warnings.append(
-            "⚠️ اختیار ضرب توکن فعال است | Mint authority is active"
-        )
+    if current_price <= 0:
+        return None
 
-    if freeze:
-        warnings.append(
-            "⚠️ اختیار فریز توکن فعال است | Freeze authority is active"
-        )
+    created = pair.get("pairCreatedAt")
 
-    holders = data.get("topHolders") or []
+    if not created:
+        return None
 
-    percentages = [
-        num(holder.get("pct"))
-        for holder in holders[:10]
-        if isinstance(holder, dict)
-    ]
-
-    concentration = sum(percentages)
-
-    if percentages and concentration >= 80:
-        warnings.append(
-            "🚨 تمرکز بسیار زیاد در ۱۰ هولدر اول | "
-            "Very high concentration among top 10 holders"
-        )
-    elif percentages and concentration >= 60:
-        warnings.append(
-            "⚠️ تمرکز بالا در ۱۰ هولدر اول | "
-            "High concentration among top 10 holders"
-        )
-
-    for risk in data.get("risks") or []:
-        if not isinstance(risk, dict):
-            continue
-
-        level = str(risk.get("level", "")).lower()
-        name = risk.get("name", "ریسک نامشخص")
-
-        if level in ("danger", "critical", "high"):
-            warnings.append(
-                f"🚨 ریسک: {name} | Risk: {name}"
-            )
-
-    if not warnings:
-        warnings.append(
-            "ریسک مهمی ثبت نشده | No major risk reported"
-        )
-
-    return (
-        "گزارش دریافت شد | Report received",
-        warnings[:5]
+    history = get_ath(
+        pair.get("pairAddress"),
+        created
     )
 
+    ath = history["ath"]
 
-def classify(data):
-    score = data["score"]
-    liquidity = data["liquidity"]
-    volume = data["volume"]
-    txns = data["buys"] + data["sells"]
-    change = data["change"]
+    if ath <= 0:
+        return None
 
-    if (
-        data["age"] is not None
-        and data["age"] <= 6
-        and liquidity >= MIN_LIQ_EARLY
-        and volume >= 300
-        and txns >= 3
-        and score >= MIN_SCORE_EARLY
-    ):
-        return "🟡 شکار زودهنگام | Early Discovery"
+    drop = ((ath - current_price) / ath) * 100
 
-    if (
-        liquidity >= MIN_LIQ_PREPUMP
-        and volume >= 1000
-        and txns >= 5
-        and score >= MIN_SCORE_PREPUMP
-        and change <= 60
-    ):
-        return "🟢 احتمال رشد اولیه | Early Growth Potential"
-
-    if (
-        liquidity >= MIN_LIQ_MOMENTUM
-        and volume >= 2000
-        and txns >= 8
-        and score >= MIN_SCORE_MOMENTUM
-        and 0 < change <= 100
-    ):
-        return "🔥 مومنتوم فعال | Active Momentum"
-
-    return None
+    return {
+        "pair": pair,
+        "name": pair.get("baseToken", {}).get("name", "Unknown"),
+        "symbol": pair.get("baseToken", {}).get("symbol", "N/A"),
+        "address": address,
+        "price": current_price,
+        "ath": ath,
+        "drop": drop,
+        "liquidity": number(
+            (pair.get("liquidity") or {}).get("usd")
+        ),
+        "volume": number(
+            (pair.get("volume") or {}).get("h24")
+        ),
+        "created": created,
+        "history_complete": history["complete"],
+        "candles": history["candles"],
+        "pages": history["pages"],
+        "pair_address": pair.get("pairAddress"),
+        "dex_url": pair.get("url")
+    }
 
 
-def make_message(name, symbol, address, pair, data, category, security):
-    age = (
-        f"{fa(data['age'], 1)} ساعت | {data['age']:.1f} hours"
-        if data["age"] is not None
-        else "نامشخص | Unknown"
+# =====================================
+# MESSAGE
+# =====================================
+
+def make_message(item, source):
+    age_hours = max(
+        0,
+        (time.time() - number(item["created"]) / 1000) / 3600
     )
 
-    warning_text = "\n".join(security[1])
-    pair_address = pair.get("pairAddress", "")
+    drop = item["drop"]
 
-    score = data["score"]
-    ratio = data["ratio"]
+    message = (
+        "🎯 DEX HUNTER V7\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "🚨 ATH DROP ALERT | هشدار ریزش از سقف\n\n"
 
-    if score >= 75:
-        analysis_fa = "قدرت بازار بالا است؛ اما ریسک همچنان وجود دارد."
-        analysis_en = "Market strength is high, but risk remains."
-    elif score >= 55:
-        analysis_fa = "نشانه‌های مثبتی دیده می‌شود؛ برای تأیید بیشتر بررسی کن."
-        analysis_en = "Positive signals detected; further confirmation is needed."
-    elif score >= 35:
-        analysis_fa = "سیگنال اولیه است و هنوز قدرت کافی تأیید نشده."
-        analysis_en = "Early signal; strength is not yet fully confirmed."
-    else:
-        analysis_fa = "قدرت سیگنال پایین است؛ احتیاط کن."
-        analysis_en = "Signal strength is low; proceed with caution."
-
-    if ratio > 1.5:
-        flow_fa = "تعداد خریدها از فروش‌ها بیشتر است."
-        flow_en = "Buy transactions are higher than sell transactions."
-    elif ratio >= 1:
-        flow_fa = "خرید و فروش تقریباً متعادل هستند."
-        flow_en = "Buying and selling activity is relatively balanced."
-    else:
-        flow_fa = "فشار فروش بیشتر از خرید است."
-        flow_en = "Selling pressure is stronger than buying pressure."
-
-    return (
-        "🎯 DEX HUNTER V6.3\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🪙 {name} ({symbol})\n"
-        f"📌 نوع شکار | Signal: {category}\n"
-        f"⭐ امتیاز بازار | Market Score: {fa(score)}/۱۰۰ | {score}/100\n\n"
+        f"🪙 {item['name']} ({item['symbol']})\n"
+        f"📍 منبع کشف | Discovery: {source}\n\n"
 
         "🇮🇷 تحلیل فارسی\n"
-        f"• {analysis_fa}\n"
-        f"• {flow_fa}\n\n"
+        f"🔻 ریزش از سقف تاریخی: {fa(drop)}٪\n"
+        f"🏔 بالاترین قیمت ثبت‌شده: ${item['ath']}\n"
+        f"💵 قیمت فعلی: ${item['price']}\n"
+        f"💧 نقدینگی: ${fa(item['liquidity'])}\n"
+        f"📊 حجم ۲۴ ساعته: ${fa(item['volume'])}\n"
+        f"⏳ عمر استخر: {fa(age_hours, 1)} ساعت\n"
+        "✅ شرط ریزش ۷۵٪ یا بیشتر برقرار است.\n\n"
 
         "🇬🇧 English Analysis\n"
-        f"• {analysis_en}\n"
-        f"• {flow_en}\n\n"
+        f"🔻 Drawdown from ATH: {drop:.2f}%\n"
+        f"🏔 Historical high: ${item['ath']}\n"
+        f"💵 Current price: ${item['price']}\n"
+        f"💧 Liquidity: ${item['liquidity']:,.2f}\n"
+        f"📊 24H Volume: ${item['volume']:,.2f}\n"
+        f"⏳ Pool age: {age_hours:.1f} hours\n"
+        "✅ The 75% or greater drawdown condition is met.\n\n"
 
-        "📊 اطلاعات بازار | Market Data\n"
-        f"💧 نقدینگی | Liquidity: ${fa(data['liquidity'])}\n"
-        f"📈 حجم یک‌ساعته | 1H Volume: ${fa(data['volume'])}\n"
-        f"⚡ حجم ۵ دقیقه | 5M Volume: ${fa(data['volume5'])}\n"
-        f"🟢 خرید یک‌ساعته | 1H Buys: {fa(data['buys'])}\n"
-        f"🔴 فروش یک‌ساعته | 1H Sells: {fa(data['sells'])}\n"
-        f"⚖️ نسبت خرید/فروش | Buy/Sell Ratio: {fa(ratio, 2)}\n"
-        f"📈 تغییر ۵ دقیقه | 5M Change: {fa(data['change5'], 2)}٪ | {data['change5']:.2f}%\n"
-        f"📈 تغییر یک‌ساعته | 1H Change: {fa(data['change'], 2)}٪ | {data['change']:.2f}%\n"
-        f"⏳ عمر استخر | Pool Age: {age}\n"
-        f"💵 قیمت | Price: ${data['price']}\n\n"
+        "📚 بررسی تاریخچه | History Check\n"
+        f"کندل‌های بررسی‌شده | Candles: {item['candles']}\n"
+        f"صفحات تاریخچه | Pages: {item['pages']}\n"
+        f"تاریخچه کامل | Full history: "
+        f"{'بله / Yes' if item['history_complete'] else 'خیر / No'}\n\n"
 
-        "🛡️ بررسی امنیت | Security Check\n"
-        f"وضعیت | Status: {security[0]}\n"
-        f"{warning_text}\n\n"
-
-        "📍 آدرس قرارداد | Contract Address:\n"
-        f"{address}\n\n"
+        "📍 قرارداد | Contract:\n"
+        f"{item['address']}\n\n"
 
         "🔗 نمودار | Chart:\n"
-        f"https://dexscreener.com/solana/{pair_address}\n\n"
+        f"https://dexscreener.com/solana/{item['pair_address']}\n\n"
 
-        "⚠️ امتیاز بازار تضمین سود یا امنیت نیست.\n"
-        "⚠️ Market score does not guarantee profit or safety.\n"
-        "⚠️ تعداد خرید و فروش، تعداد کیف پول‌های منحصربه‌فرد نیست.\n"
-        "⚠️ Transaction counts do not represent unique wallets."
+        "⚠️ ریزش زیاد به معنی فرصت خرید نیست.\n"
+        "⚠️ A large drawdown does not mean a buying opportunity.\n"
+        "⚠️ اگر تاریخچه کامل نباشد، سقف محاسبه‌شده ممکن است سقف واقعی نباشد.\n"
+        "⚠️ If history is incomplete, the calculated high may not be the true ATH."
     )
 
+    return message
+
+
+# =====================================
+# MAIN SCANNER
+# =====================================
 
 def scan():
     if not BOT_TOKEN:
@@ -486,120 +492,63 @@ def scan():
     state = load_state()
     candidates = discover_tokens()
 
-    sent = 0
-    security_checks = 0
+    alerts = 0
 
-    for address, source in candidates:
+    for candidate in candidates:
+        address = candidate["address"]
+        source = candidate["source"]
+
         try:
+            result = analyze_token(address)
+
+            if not result:
+                continue
+
+            if result["drop"] < DROP_THRESHOLD:
+                continue
+
+            # Never claim a true lifetime ATH
+            # if historical candles are incomplete.
+            if not result["history_complete"]:
+                print("INCOMPLETE HISTORY:", address)
+                continue
+
             old = state.get(address, {})
 
-            if not isinstance(old, dict):
-                old = {}
-
-            pairs = get_json(
-                f"{DEX}/token-pairs/v1/solana/{address}"
-            )
-
-            if not isinstance(pairs, list) or not pairs:
+            # Send once per token
+            if old.get("alerted"):
                 continue
 
-            pairs.sort(
-                key=lambda p: num(
-                    (p.get("liquidity") or {}).get("usd")
-                ),
-                reverse=True
-            )
+            message = make_message(result, source)
 
-            pair = pairs[0]
-            base = pair.get("baseToken") or {}
-
-            data = analyze(pair)
-            category = classify(data)
-
-            if not category:
-                continue
-
-            previous_score = num(old.get("score"))
-            previous_volume = num(old.get("volume"))
-
-            is_new = not old.get("sent")
-
-            score_upgrade = (
-                data["score"] >= previous_score + 10
-            )
-
-            volume_jump = (
-                previous_volume > 0
-                and data["volume"] >= previous_volume * 2
-            )
-
-            should_alert = (
-                is_new or (
-                    old.get("sent")
-                    and (score_upgrade or volume_jump)
-                )
-            )
-
-            if not should_alert:
-                old["score"] = data["score"]
-                old["volume"] = data["volume"]
-                state[address] = old
-                continue
-
-            if security_checks < MAX_SECURITY_CHECKS:
-                security = security_check(address)
-                security_checks += 1
-                time.sleep(0.3)
-            else:
-                security = (
-                    "در این نوبت بررسی نشد | Not checked this scan",
-                    [
-                        "⚠️ وضعیت امنیت نامشخص است | "
-                        "Security status is unknown"
-                    ]
-                )
-
-            message = make_message(
-                base.get("name", "Unknown"),
-                base.get("symbol", "N/A"),
-                address,
-                pair,
-                data,
-                category,
-                security
-            )
-
-            delivered = send_telegram(message)
+            delivered = post_telegram(message)
 
             if delivered:
                 state[address] = {
-                    "sent": True,
-                    "score": data["score"],
-                    "volume": data["volume"],
-                    "last_alert": datetime.now(
-                        timezone.utc
-                    ).isoformat()
+                    "alerted": True,
+                    "ath": result["ath"],
+                    "price": result["price"],
+                    "drop": result["drop"],
+                    "date": now()
                 }
 
-                sent += 1
                 save_state(state)
+                alerts += 1
 
-            if sent >= MAX_ALERTS:
+            if alerts >= MAX_ALERTS:
                 break
 
-            time.sleep(0.2)
+            time.sleep(0.5)
 
         except Exception as error:
             print("TOKEN ERROR:", address, str(error))
-            continue
 
     save_state(state)
 
     print(
-        "DEX Hunter V6.3 finished | "
+        "DEX HUNTER V7 FINISHED | "
         f"Candidates: {len(candidates)} | "
-        f"Alerts: {sent} | "
-        f"Security checks: {security_checks}"
+        f"Alerts: {alerts}"
     )
 
 
