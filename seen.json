@@ -207,8 +207,8 @@
       "registered_at": 1795293003.5821605
     }
   },
-  "ath_cursor": 0,
-  "breakout_cursor": 5,
+  "ath_cursor": 5,
+  "breakout_cursor": 10,
   "buy_cursor": 0,
   "telegram_update_offset": 435217142
 }
