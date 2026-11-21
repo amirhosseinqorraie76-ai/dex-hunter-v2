@@ -3,29 +3,34 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V13
+DEX HUNTER V14
 
-Sources:
+SOURCES:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
 
-Independent filters:
+FILTER 1: ATH DROP
+Market cap >= $50,000
+Price >= 30% below observed ATH
 
-A) ATH DROP:
-   Market cap >= $50,000
-   Price >= 30% below observed ATH
+FILTER 2: VOLUME
+Token age > 1 day
+24h volume >= $500,000
 
-B) VOLUME:
-   Token/pool age > 1 day
-   24h volume >= $500,000
+FILTER 3: ATH BREAKOUT
+Previous ATH identified
+Price drops >= 75% below ATH
+Later candle high breaks same ATH
+Close above ATH NOT required
 
-C) ATH BREAKOUT:
-   Previous ATH identified
-   Price drops at least 75% below that ATH
-   Later candle high breaks the same ATH
-   Candle close above ATH is NOT required
+NEW FILTER 4: ATH RECLAIM BUY
+Only tokens previously alerted by ATH DROP.
+Persistent tracking in seen.json.
+Price >= 99.5% of stored ATH.
+Independent DexScreener monitoring.
+One BUY alert per token per Telegram chat.
 
 Alerts only. No automatic trading.
 """
@@ -56,21 +61,27 @@ CHAT_IDS = [
     "1012061523",
 ]
 
-# FILTER 1: ATH DROP
+# FILTER 1
 
 ATH_MIN_MARKET_CAP_USD = 50_000
 ATH_MIN_DROP_PERCENT = 30.0
 
-# FILTER 2: VOLUME
+# FILTER 2
 
 VOLUME_MIN_AGE_DAYS = 1
 VOLUME_MIN_24H_USD = 500_000
 
-# FILTER 3: ATH BREAKOUT
+# FILTER 3
 
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_HISTORY_LIMIT = 1000
 BREAKOUT_MAX_AGE_DAYS = 990
+
+# FILTER 4 - NEW BUY ALERT
+
+BUY_ATH_THRESHOLD_PERCENT = 99.5
+BUY_CHECKS_PER_RUN = 30
+BUY_ALERT_ENABLED = True
 
 STATE_FILE = Path("seen.json")
 
@@ -86,7 +97,7 @@ PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V13/1.0",
+    "User-Agent": "DEX-HUNTER-V14/1.0",
     "Accept": "application/json",
 }
 
@@ -100,10 +111,10 @@ session.headers.update(HEADERS)
 
 
 # ==================================================
-# GENERAL HELPERS
+# HELPERS
 # ==================================================
 
-def get_json(url: str, params: Optional[dict] = None) -> Any:
+def get_json(url, params=None):
 
     try:
 
@@ -132,7 +143,7 @@ def get_json(url: str, params: Optional[dict] = None) -> Any:
         return None
 
 
-def as_float(value: Any) -> Optional[float]:
+def as_float(value):
 
     try:
 
@@ -167,7 +178,7 @@ def first(*values):
     return None
 
 
-def parse_timestamp(value: Any) -> Optional[float]:
+def parse_timestamp(value):
 
     if value is None or value == "":
         return None
@@ -181,7 +192,6 @@ def parse_timestamp(value: Any) -> Optional[float]:
             )
 
             if parsed.tzinfo is None:
-
                 parsed = parsed.replace(
                     tzinfo=timezone.utc
                 )
@@ -197,12 +207,12 @@ def parse_timestamp(value: Any) -> Optional[float]:
         return None
 
     if result > 10_000_000_000:
-        result /= 1000.0
+        result /= 1000
 
     return result
 
 
-def rows_from(payload: Any) -> list:
+def rows_from(payload):
 
     if isinstance(payload, list):
 
@@ -254,7 +264,7 @@ def rows_from(payload: Any) -> list:
     return []
 
 
-def mint_looks_valid(mint: Any) -> bool:
+def mint_looks_valid(mint):
 
     return (
         isinstance(mint, str)
@@ -262,24 +272,34 @@ def mint_looks_valid(mint: Any) -> bool:
     )
 
 
+def dex_url(mint):
+
+    return f"https://dexscreener.com/solana/{mint}"
+
+
 # ==================================================
-# STATE / DUPLICATE CONTROL
+# STATE
 # ==================================================
 
-def empty_state() -> dict:
+def empty_state():
 
     return {
         "sent": {
             "ath": [],
             "volume": [],
             "ath_breakout": [],
+            "ath_reclaim": [],
         },
+
+        "ath_watch": {},
+
         "ath_cursor": 0,
         "breakout_cursor": 0,
+        "buy_cursor": 0,
     }
 
 
-def load_state() -> dict:
+def load_state():
 
     if not STATE_FILE.exists():
         return empty_state()
@@ -292,27 +312,29 @@ def load_state() -> dict:
             )
         )
 
+        default = empty_state()
+
         state.setdefault("sent", {})
 
-        state["sent"].setdefault("ath", [])
-        state["sent"].setdefault("volume", [])
-        state["sent"].setdefault("ath_breakout", [])
+        for key in default["sent"]:
+            state["sent"].setdefault(key, [])
+
+        state.setdefault("ath_watch", {})
 
         state.setdefault("ath_cursor", 0)
         state.setdefault("breakout_cursor", 0)
+        state.setdefault("buy_cursor", 0)
 
         return state
 
     except Exception:
 
-        logging.exception(
-            "Could not read seen.json"
-        )
+        logging.exception("State loading failed")
 
         return empty_state()
 
 
-def save_state(state: dict) -> None:
+def save_state(state):
 
     temp = STATE_FILE.with_suffix(".tmp")
 
@@ -329,13 +351,80 @@ def save_state(state: dict) -> None:
 
 
 # ==================================================
-# TOKEN NORMALIZATION
+# TELEGRAM
 # ==================================================
 
-def normalize(
-    row: dict,
-    source: str,
-) -> Optional[dict]:
+def send_telegram(chat_id, message):
+
+    if not BOT_TOKEN:
+        return False
+
+    url = (
+        "https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
+
+    try:
+
+        response = session.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "text": message,
+                "disable_web_page_preview": True,
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+
+        response.raise_for_status()
+
+        return bool(response.json().get("ok"))
+
+    except Exception as exc:
+
+        logging.warning(
+            "Telegram failed %s: %s",
+            chat_id,
+            exc,
+        )
+
+        return False
+
+
+def deliver(state, scanner, mint, message):
+
+    sent = set(state["sent"][scanner])
+
+    for chat_id in CHAT_IDS:
+
+        key = f"{mint}|{chat_id}"
+
+        if key in sent:
+            continue
+
+        if send_telegram(chat_id, message):
+
+            sent.add(key)
+
+            state["sent"][scanner] = sorted(sent)
+
+            save_state(state)
+
+        else:
+
+            logging.warning(
+                "Telegram retry required: %s",
+                key,
+            )
+
+        time.sleep(0.12)
+
+
+# ==================================================
+# NORMALIZATION
+# ==================================================
+
+def normalize(row, source):
 
     attrs = (
         row.get("attributes")
@@ -343,31 +432,15 @@ def normalize(
         else {}
     )
 
-    rels = (
-        row.get("relationships")
-        if isinstance(row.get("relationships"), dict)
-        else {}
-    )
+    rels = row.get("relationships") or {}
 
-    base_rel = rels.get("base_token", {})
+    base_rel = rels.get("base_token") or {}
 
-    base_data = (
-        base_rel.get("data", {})
-        if isinstance(base_rel, dict)
-        else {}
-    )
+    base_data = base_rel.get("data") or {}
 
-    base_id = (
-        base_data.get("id")
-        if isinstance(base_data, dict)
-        else None
-    )
+    base_id = base_data.get("id")
 
-    base = (
-        row.get("baseToken")
-        if isinstance(row.get("baseToken"), dict)
-        else {}
-    )
+    base = row.get("baseToken") or {}
 
     mint = first(
         row.get("mint"),
@@ -403,18 +476,6 @@ def normalize(
         attrs.get("creation_timestamp"),
     )
 
-    created_ts = parse_timestamp(created)
-
-    pair_created = parse_timestamp(
-        first(
-            row.get("pairCreatedAt"),
-            row.get("pair_created_at"),
-            attrs.get("pair_created_at"),
-            attrs.get("pool_created_at"),
-            attrs.get("created_at"),
-        )
-    )
-
     volume_data = first(
         attrs.get("volume_usd"),
         row.get("volume"),
@@ -425,8 +486,42 @@ def normalize(
     if not isinstance(volume_data, dict):
         volume_data = {}
 
-    volume_24h = as_float(
-        first(
+    return {
+        "mint": mint,
+
+        "name": str(first(
+            row.get("name"),
+            row.get("tokenName"),
+            base.get("name"),
+            attrs.get("name"),
+            "Unknown",
+        )),
+
+        "symbol": str(first(
+            row.get("symbol"),
+            row.get("ticker"),
+            base.get("symbol"),
+            attrs.get("symbol"),
+            "???",
+        )),
+
+        "sources": {source},
+
+        "price": as_float(first(
+            row.get("priceUsd"),
+            row.get("price_usd"),
+            attrs.get("base_token_price_usd"),
+        )),
+
+        "market_cap": as_float(first(
+            row.get("marketCap"),
+            row.get("market_cap"),
+            row.get("usd_market_cap"),
+            row.get("marketCapUsd"),
+            attrs.get("market_cap_usd"),
+        )),
+
+        "volume_24h": as_float(first(
             row.get("volume24h"),
             row.get("volume_24h"),
             row.get("volume24hUsd"),
@@ -434,56 +529,16 @@ def normalize(
             row.get("volumeUsd24h"),
             volume_data.get("h24"),
             volume_data.get("24h"),
-        )
-    )
+        )),
 
-    return {
-        "mint": mint,
+        "created_ts": parse_timestamp(created),
 
-        "name": str(
-            first(
-                row.get("name"),
-                row.get("tokenName"),
-                base.get("name"),
-                attrs.get("name"),
-                "Unknown",
-            )
-        ),
-
-        "symbol": str(
-            first(
-                row.get("symbol"),
-                row.get("ticker"),
-                base.get("symbol"),
-                attrs.get("symbol"),
-                "???",
-            )
-        ),
-
-        "sources": {source},
-
-        "price": as_float(
-            first(
-                row.get("priceUsd"),
-                row.get("price_usd"),
-                attrs.get("base_token_price_usd"),
-            )
-        ),
-
-        "market_cap": as_float(
-            first(
-                row.get("marketCap"),
-                row.get("market_cap"),
-                row.get("usd_market_cap"),
-                row.get("marketCapUsd"),
-                attrs.get("market_cap_usd"),
-            )
-        ),
-
-        "volume_24h": volume_24h,
-
-        "created_ts": created_ts,
-        "pair_created_ts": pair_created,
+        "pair_created_ts": parse_timestamp(first(
+            row.get("pairCreatedAt"),
+            row.get("pair_created_at"),
+            attrs.get("pair_created_at"),
+            attrs.get("pool_created_at"),
+        )),
 
         "dex_url": first(
             row.get("url"),
@@ -494,10 +549,7 @@ def normalize(
     }
 
 
-def add_candidate(
-    store: dict,
-    candidate: Optional[dict],
-) -> None:
+def add_candidate(store, candidate):
 
     if not candidate:
         return
@@ -505,15 +557,12 @@ def add_candidate(
     mint = candidate["mint"]
 
     if mint not in store:
-
         store[mint] = candidate
         return
 
     old = store[mint]
 
-    old["sources"].update(
-        candidate["sources"]
-    )
+    old["sources"].update(candidate["sources"])
 
     for field in (
         "name",
@@ -537,11 +586,7 @@ def add_candidate(
 
     if new_volume is not None:
 
-        if (
-            old_volume is None
-            or new_volume > old_volume
-        ):
-
+        if old_volume is None or new_volume > old_volume:
             old["volume_24h"] = new_volume
 
 
@@ -549,7 +594,7 @@ def add_candidate(
 # SOURCE 1: DEXSCREENER
 # ==================================================
 
-def source_dexscreener(store: dict) -> None:
+def source_dexscreener(store):
 
     endpoints = [
         f"{DEX}/token-profiles/latest/v1",
@@ -569,38 +614,33 @@ def source_dexscreener(store: dict) -> None:
 
         for row in source_rows[:MAX_SOURCE_ROWS]:
 
-            if row.get("chainId") not in (
-                None,
-                "solana",
-            ):
+            if row.get("chainId") not in (None, "solana"):
                 continue
 
             mint = row.get("tokenAddress")
 
-            if mint_looks_valid(mint):
+            if not mint_looks_valid(mint):
+                continue
 
-                add_candidate(
-                    store,
-                    normalize(
-                        {
-                            "mint": mint,
-                            "name": (
-                                row.get("description")
-                                or "Unknown"
-                            ),
-                            "symbol": "???",
-                            "url": row.get("url"),
-                        },
-                        "DexScreener",
-                    ),
-                )
+            add_candidate(
+                store,
+                normalize(
+                    {
+                        "mint": mint,
+                        "name": row.get("description") or "Unknown",
+                        "symbol": "???",
+                        "url": row.get("url"),
+                    },
+                    "DexScreener",
+                ),
+            )
 
 
 # ==================================================
 # SOURCE 2: GECKOTERMINAL
 # ==================================================
 
-def source_geckoterminal(store: dict) -> None:
+def source_geckoterminal(store):
 
     for endpoint in (
         "new_pools",
@@ -635,25 +675,19 @@ def source_geckoterminal(store: dict) -> None:
 
             attrs = row.get("attributes") or {}
 
-            candidate = normalize(
-                {
-                    "mint": mint,
-                    "name": attrs.get("name"),
-                    "price_usd": attrs.get(
-                        "base_token_price_usd"
-                    ),
-                    "created_at": attrs.get(
-                        "pool_created_at"
-                    ),
-                    "volume": attrs.get("volume_usd"),
-                    "url": attrs.get("url"),
-                },
-                "GeckoTerminal",
-            )
-
             add_candidate(
                 store,
-                candidate,
+                normalize(
+                    {
+                        "mint": mint,
+                        "name": attrs.get("name"),
+                        "price_usd": attrs.get("base_token_price_usd"),
+                        "created_at": attrs.get("pool_created_at"),
+                        "volume": attrs.get("volume_usd"),
+                        "url": attrs.get("url"),
+                    },
+                    "GeckoTerminal",
+                ),
             )
 
 
@@ -661,7 +695,7 @@ def source_geckoterminal(store: dict) -> None:
 # SOURCE 3: PUMP.FUN
 # ==================================================
 
-def source_pump_fun(store: dict) -> None:
+def source_pump_fun(store):
 
     payload = get_json(
         f"{PUMP}/coins/latest",
@@ -676,10 +710,7 @@ def source_pump_fun(store: dict) -> None:
 
         add_candidate(
             store,
-            normalize(
-                row,
-                "Pump.fun",
-            ),
+            normalize(row, "Pump.fun"),
         )
 
 
@@ -687,7 +718,7 @@ def source_pump_fun(store: dict) -> None:
 # SOURCE 4: STONK.FUN
 # ==================================================
 
-def source_stonk_fun(store: dict) -> None:
+def source_stonk_fun(store):
 
     payload = get_json(
         f"{STONK}/tokens",
@@ -702,18 +733,15 @@ def source_stonk_fun(store: dict) -> None:
 
         add_candidate(
             store,
-            normalize(
-                row,
-                "Stonk.fun",
-            ),
+            normalize(row, "Stonk.fun"),
         )
 
 
 # ==================================================
-# DEXSCREENER METRICS ENRICHMENT
+# DEXSCREENER ENRICHMENT
 # ==================================================
 
-def enrich_from_dexscreener(store: dict) -> None:
+def enrich_from_dexscreener(store):
 
     mints = list(store.keys())
 
@@ -745,22 +773,12 @@ def enrich_from_dexscreener(store: dict) -> None:
 
             candidate = store[mint]
 
-            candidate["name"] = (
-                base.get("name")
-                or candidate["name"]
-            )
+            candidate["name"] = base.get("name") or candidate["name"]
+            candidate["symbol"] = base.get("symbol") or candidate["symbol"]
 
-            candidate["symbol"] = (
-                base.get("symbol")
-                or candidate["symbol"]
-            )
-
-            liquidity = (
-                as_float(
-                    (pair.get("liquidity") or {}).get("usd")
-                )
-                or 0.0
-            )
+            liquidity = as_float(
+                (pair.get("liquidity") or {}).get("usd")
+            ) or 0.0
 
             pair_volume = as_float(
                 (pair.get("volume") or {}).get("h24")
@@ -768,15 +786,9 @@ def enrich_from_dexscreener(store: dict) -> None:
 
             if pair_volume is not None:
 
-                old_volume = candidate.get(
-                    "volume_24h"
-                )
+                old_volume = candidate.get("volume_24h")
 
-                if (
-                    old_volume is None
-                    or pair_volume > old_volume
-                ):
-
+                if old_volume is None or pair_volume > old_volume:
                     candidate["volume_24h"] = pair_volume
 
             pair_created = parse_timestamp(
@@ -785,23 +797,12 @@ def enrich_from_dexscreener(store: dict) -> None:
 
             if pair_created:
 
-                old_pair_created = candidate.get(
-                    "pair_created_ts"
-                )
+                old_created = candidate.get("pair_created_ts")
 
-                if (
-                    old_pair_created is None
-                    or pair_created < old_pair_created
-                ):
+                if old_created is None or pair_created < old_created:
+                    candidate["pair_created_ts"] = pair_created
 
-                    candidate["pair_created_ts"] = (
-                        pair_created
-                    )
-
-            if liquidity >= candidate.get(
-                "liquidity",
-                0,
-            ):
+            if liquidity >= candidate.get("liquidity", 0):
 
                 candidate["liquidity"] = liquidity
 
@@ -823,10 +824,10 @@ def enrich_from_dexscreener(store: dict) -> None:
 
 
 # ==================================================
-# GECKOTERMINAL POOL SELECTION
+# GECKO POOL SELECTION
 # ==================================================
 
-def gecko_best_pool(mint: str):
+def gecko_best_pool(mint):
 
     payload = get_json(
         f"{GECKO}/networks/solana/tokens/{mint}/pools",
@@ -843,71 +844,45 @@ def gecko_best_pool(mint: str):
         rels = row.get("relationships") or {}
 
         pool_id = row.get("id")
-        pool_address = None
-
-        if (
-            isinstance(pool_id, str)
-            and "_" in pool_id
-        ):
-
-            pool_address = pool_id.split("_", 1)[1]
 
         pool_address = (
-            pool_address
-            or attrs.get("address")
+            pool_id.split("_", 1)[1]
+            if isinstance(pool_id, str) and "_" in pool_id
+            else attrs.get("address")
         )
 
         base_id = (
-            (
-                (rels.get("base_token") or {}).get("data")
-                or {}
-            ).get("id")
-        )
+            (rels.get("base_token") or {}).get("data") or {}
+        ).get("id")
 
         quote_id = (
-            (
-                (rels.get("quote_token") or {}).get("data")
-                or {}
-            ).get("id")
-        )
+            (rels.get("quote_token") or {}).get("data") or {}
+        ).get("id")
 
         base_mint = (
             base_id.split("_", 1)[1]
-            if isinstance(base_id, str)
-            and "_" in base_id
+            if isinstance(base_id, str) and "_" in base_id
             else None
         )
 
         quote_mint = (
             quote_id.split("_", 1)[1]
-            if isinstance(quote_id, str)
-            and "_" in quote_id
+            if isinstance(quote_id, str) and "_" in quote_id
             else None
         )
 
         if mint == base_mint:
-
             side = "base"
-
         elif mint == quote_mint:
-
             side = "quote"
-
         else:
-
             continue
 
-        liquidity = (
-            as_float(
-                attrs.get("reserve_in_usd")
-            )
-            or 0.0
-        )
+        liquidity = as_float(
+            attrs.get("reserve_in_usd")
+        ) or 0.0
 
-        if (
-            pool_address
-            and liquidity > best_liquidity
-        ):
+        if pool_address and liquidity > best_liquidity:
 
             best_pool = pool_address
             best_side = side
@@ -917,18 +892,14 @@ def gecko_best_pool(mint: str):
 
 
 # ==================================================
-# GECKO DAILY CANDLES
+# DAILY CANDLES
 # ==================================================
 
-def get_daily_candles(
-    mint: str,
-    limit: int = 1000,
-):
+def get_daily_candles(mint, limit=1000):
 
     pool, side = gecko_best_pool(mint)
 
     if not pool or not side:
-
         return None, None, "استخر مناسب پیدا نشد"
 
     payload = get_json(
@@ -942,25 +913,15 @@ def get_daily_candles(
     )
 
     try:
-
         candles = payload["data"]["attributes"]["ohlcv_list"]
-
     except Exception:
-
-        return (
-            None,
-            None,
-            "داده کندل روزانه در دسترس نیست",
-        )
+        return None, None, "کندل روزانه در دسترس نیست"
 
     valid = []
 
     for candle in candles:
 
-        if (
-            not isinstance(candle, list)
-            or len(candle) < 5
-        ):
+        if not isinstance(candle, list) or len(candle) < 5:
             continue
 
         ts = as_float(candle[0])
@@ -976,187 +937,52 @@ def get_daily_candles(
         ):
             continue
 
-        valid.append(
-            {
-                "time": ts,
-                "high": high,
-                "low": low,
-            }
-        )
+        valid.append({
+            "time": ts,
+            "high": high,
+            "low": low,
+        })
 
     if not valid:
+        return None, None, "کندل معتبر پیدا نشد"
 
-        return (
-            None,
-            None,
-            "کندل معتبر پیدا نشد",
-        )
+    valid.sort(key=lambda x: x["time"])
 
-    valid.sort(
-        key=lambda x: x["time"]
-    )
-
-    return (
-        valid,
-        pool,
-        "داده کندل روزانه GeckoTerminal",
-    )
+    return valid, pool, "GeckoTerminal daily candles"
 
 
 # ==================================================
 # OBSERVED ATH
 # ==================================================
 
-def observed_ath(
-    mint: str,
-    created_ts: Optional[float],
-):
+def observed_ath(mint, created_ts):
 
     if not created_ts:
+        return None, "زمان ایجاد توکن مشخص نیست"
 
-        return (
-            None,
-            "زمان واقعی ایجاد توکن مشخص نیست",
-        )
-
-    age_days = (
-        time.time() - created_ts
-    ) / 86400.0
+    age_days = (time.time() - created_ts) / 86400
 
     if age_days > 175:
+        return None, "تاریخچه کامل ATH در دسترس نیست"
 
-        return (
-            None,
-            "تاریخچه کافی برای تأیید ATH در دسترس نیست",
-        )
-
-    candles, pool, note = get_daily_candles(
-        mint,
-        1000,
-    )
+    candles, pool, note = get_daily_candles(mint, 1000)
 
     if not candles:
         return None, note
 
-    if candles[0]["time"] > (
-        created_ts + 36 * 3600
-    ):
+    if candles[0]["time"] > created_ts + 36 * 3600:
+        return None, "تاریخچه از ابتدای عمر توکن شروع نمی‌شود"
 
-        return (
-            None,
-            "تاریخچه از ابتدای عمر توکن شروع نمی‌شود",
-        )
+    ath = max(c["high"] for c in candles)
 
-    ath = max(
-        candle["high"]
-        for candle in candles
-    )
-
-    return (
-        ath,
-        "ATH مشاهده‌شده از کندل‌های روزانه GeckoTerminal",
-    )
-
-
-# ==================================================
-# TELEGRAM
-# ==================================================
-
-def send_telegram(
-    chat_id: str,
-    message: str,
-) -> bool:
-
-    if not BOT_TOKEN:
-
-        logging.error(
-            "TELEGRAM_BOT_TOKEN is missing"
-        )
-
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
-    )
-
-    try:
-
-        response = session.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "disable_web_page_preview": True,
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-
-        response.raise_for_status()
-
-        return bool(
-            response.json().get("ok")
-        )
-
-    except Exception as exc:
-
-        logging.warning(
-            "Telegram delivery failed for %s: %s",
-            chat_id,
-            exc,
-        )
-
-        return False
-
-
-def deliver(
-    state: dict,
-    scanner: str,
-    mint: str,
-    message: str,
-) -> None:
-
-    sent = set(
-        state["sent"][scanner]
-    )
-
-    for chat_id in CHAT_IDS:
-
-        delivery_key = (
-            f"{mint}|{chat_id}"
-        )
-
-        if delivery_key in sent:
-            continue
-
-        if send_telegram(
-            chat_id,
-            message,
-        ):
-
-            sent.add(delivery_key)
-
-            state["sent"][scanner] = sorted(
-                sent
-            )
-
-            save_state(state)
-
-        else:
-
-            logging.warning(
-                "Will retry delivery: %s",
-                delivery_key,
-            )
-
-        time.sleep(0.12)
+    return ath, "ATH مشاهده‌شده از کندل‌های روزانه GeckoTerminal"
 
 
 # ==================================================
 # TOKEN AGE
 # ==================================================
 
-def token_age_info(candidate: dict):
+def token_age_info(candidate):
 
     created = candidate.get("created_ts")
 
@@ -1164,61 +990,43 @@ def token_age_info(candidate: dict):
 
         age = max(
             0.0,
-            (time.time() - created) / 86400.0,
+            (time.time() - created) / 86400,
         )
 
         return age, "زمان ایجاد توکن"
 
-    pair_created = candidate.get(
-        "pair_created_ts"
-    )
+    pair_created = candidate.get("pair_created_ts")
 
     if pair_created:
 
         age = max(
             0.0,
-            (time.time() - pair_created) / 86400.0,
+            (time.time() - pair_created) / 86400,
         )
 
-        return (
-            age,
-            "عمر تخمینی بر اساس زمان ایجاد استخر",
-        )
+        return age, "عمر تخمینی بر اساس زمان ایجاد استخر"
 
     return None, None
 
 
 # ==================================================
-# FILTER 2: VOLUME SCANNER
+# FILTER 2: VOLUME
 # ==================================================
 
-def volume_filter(
-    store: dict,
-    state: dict,
-) -> int:
+def volume_filter(store, state):
 
     matches = 0
 
     for candidate in store.values():
 
-        age, age_note = token_age_info(
-            candidate
-        )
+        age, age_note = token_age_info(candidate)
 
-        volume = candidate.get(
-            "volume_24h"
-        )
+        volume = candidate.get("volume_24h")
 
-        if (
-            age is None
-            or age <= VOLUME_MIN_AGE_DAYS
-        ):
+        if age is None or age <= VOLUME_MIN_AGE_DAYS:
             continue
 
-        if (
-            volume is None
-            or volume < VOLUME_MIN_24H_USD
-        ):
+        if volume is None or volume < VOLUME_MIN_24H_USD:
             continue
 
         mint = candidate["mint"]
@@ -1229,9 +1037,7 @@ def volume_filter(
         ):
             continue
 
-        market_cap = candidate.get(
-            "market_cap"
-        )
+        market_cap = candidate.get("market_cap")
 
         market_cap_text = (
             f"${market_cap:,.0f}"
@@ -1239,32 +1045,24 @@ def volume_filter(
             else "نامشخص"
         )
 
-        url = (
-            candidate.get("dex_url")
-            or f"https://dexscreener.com/solana/{mint}"
-        )
+        url = candidate.get("dex_url") or dex_url(mint)
 
         message = (
-            "🔥 شکار حجم معاملات | DEX HUNTER V13\n"
+            "🔥 شکار حجم معاملات | DEX HUNTER V14\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"⏳ عمر: {age:.1f} روز\n"
             f"🕒 مبنای عمر: {age_note}\n"
-            f"📦 حجم معاملات ۲۴ ساعته: ${volume:,.0f}\n"
+            f"📦 حجم ۲۴ ساعته: ${volume:,.0f}\n"
             f"📊 مارکت‌کپ: {market_cap_text}\n"
             f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
             f"🧾 قرارداد: {mint}\n"
             f"📈 نمودار: {url}\n"
-            "✅ شرط فیلتر دوم: عمر بالای ۱ روز + حجم ۲۴ ساعته حداقل ۵۰۰ هزار دلار\n"
+            "✅ شرط: عمر بالای یک روز و حجم حداقل ۵۰۰ هزار دلار\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید."
         )
 
-        deliver(
-            state,
-            "volume",
-            mint,
-            message,
-        )
+        deliver(state, "volume", mint, message)
 
         matches += 1
 
@@ -1272,22 +1070,17 @@ def volume_filter(
 
 
 # ==================================================
-# FILTER 1: ATH DROP SCANNER
+# FILTER 1: ATH DROP
 # ==================================================
 
-def ath_filter(
-    store: dict,
-    state: dict,
-) -> int:
+def ath_filter(store, state):
 
     candidates = [
-        candidate
-        for candidate in store.values()
+        c for c in store.values()
         if (
-            (candidate.get("market_cap") or 0)
-            >= ATH_MIN_MARKET_CAP_USD
-            and (candidate.get("price") or 0) > 0
-            and candidate.get("created_ts")
+            (c.get("market_cap") or 0) >= ATH_MIN_MARKET_CAP_USD
+            and (c.get("price") or 0) > 0
+            and c.get("created_ts")
         )
     ]
 
@@ -1299,19 +1092,11 @@ def ath_filter(
     if not candidates:
         return 0
 
-    cursor = (
-        int(state.get("ath_cursor", 0))
-        % len(candidates)
-    )
+    cursor = int(state.get("ath_cursor", 0)) % len(candidates)
 
-    ordered = (
-        candidates[cursor:]
-        + candidates[:cursor]
-    )
+    ordered = candidates[cursor:] + candidates[:cursor]
 
-    batch = ordered[
-        :MAX_ATH_CHECKS_PER_RUN
-    ]
+    batch = ordered[:MAX_ATH_CHECKS_PER_RUN]
 
     state["ath_cursor"] = (
         cursor + len(batch)
@@ -1325,12 +1110,6 @@ def ath_filter(
 
         mint = candidate["mint"]
 
-        if all(
-            f"{mint}|{chat}" in state["sent"]["ath"]
-            for chat in CHAT_IDS
-        ):
-            continue
-
         ath, note = observed_ath(
             mint,
             candidate.get("created_ts"),
@@ -1338,47 +1117,61 @@ def ath_filter(
 
         price = candidate.get("price") or 0
 
-        if (
-            not ath
-            or price <= 0
-            or ath < price
-        ):
+        if not ath or price <= 0 or price > ath:
             continue
 
-        drop = (
-            (ath - price) / ath
-        ) * 100.0
+        drop = ((ath - price) / ath) * 100
 
         if drop < ATH_MIN_DROP_PERCENT:
             continue
 
-        url = (
-            candidate.get("dex_url")
-            or f"https://dexscreener.com/solana/{mint}"
-        )
+        # NEW: Persistent ATH tracking.
+        # Keep the highest recorded ATH for this token.
+
+        watch = state["ath_watch"].get(mint, {})
+
+        previous_ath = as_float(watch.get("ath")) or 0
+
+        stored_ath = max(ath, previous_ath)
+
+        state["ath_watch"][mint] = {
+            "ath": stored_ath,
+            "name": candidate["name"],
+            "symbol": candidate["symbol"],
+            "sources": sorted(candidate["sources"]),
+            "url": candidate.get("dex_url") or dex_url(mint),
+            "created_ts": candidate.get("created_ts"),
+            "registered_at": watch.get("registered_at") or time.time(),
+        }
+
+        save_state(state)
+
+        # Do not repeat the original ATH drop alert.
+
+        if all(
+            f"{mint}|{chat}" in state["sent"]["ath"]
+            for chat in CHAT_IDS
+        ):
+            continue
 
         message = (
-            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V13\n"
+            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V14\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"💰 قیمت فعلی: ${price:.10g}\n"
-            f"🏔 سقف مشاهده‌شده: ${ath:.10g}\n"
+            f"🏔 سقف مشاهده‌شده: ${stored_ath:.10g}\n"
             f"📉 افت از ATH: {drop:.1f}%\n"
             f"📊 مارکت‌کپ: ${(candidate.get('market_cap') or 0):,.0f}\n"
             f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
             f"🧾 قرارداد: {mint}\n"
-            f"📈 نمودار: {url}\n"
+            f"📈 نمودار: {candidate.get('dex_url') or dex_url(mint)}\n"
             f"ℹ️ {note}\n"
-            "✅ شرط فیلتر اول: مارکت‌کپ حداقل ۵۰ هزار دلار + افت حداقل ۳۰٪ از ATH\n"
+            "✅ شرط: مارکت‌کپ حداقل ۵۰ هزار دلار + افت حداقل ۳۰٪\n"
+            "👁 این توکن برای هشدار بازگشت به ATH ذخیره شد.\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید."
         )
 
-        deliver(
-            state,
-            "ath",
-            mint,
-            message,
-        )
+        deliver(state, "ath", mint, message)
 
         matches += 1
 
@@ -1388,44 +1181,22 @@ def ath_filter(
 
 
 # ==================================================
-# FILTER 3: ATH BREAKOUT SCANNER
+# FILTER 3: ATH BREAKOUT
 # ==================================================
 
-def find_ath_breakout(
-    candles: list,
-    created_ts: Optional[float],
-):
-    """
-    Chronological sequence:
-
-    1. Identify an earlier ATH.
-    2. A later candle low reaches <= 25% of that ATH.
-    3. A still later candle high exceeds the same ATH.
-    4. The latest candle must also have high above that ATH.
-
-    Candle close above ATH is NOT required.
-    The wick/high is sufficient.
-
-    Daily OHLCV cannot establish the exact intraday
-    order of high and low inside one candle. Therefore,
-    the ATH, drawdown and breakout must occur in
-    separate chronological candles.
-    """
+def find_ath_breakout(candles, created_ts):
 
     if not candles:
         return None
 
-    if created_ts:
-
-        if candles[0]["time"] > (
-            created_ts + 36 * 3600
-        ):
-            return None
+    if created_ts and candles[0]["time"] > created_ts + 36 * 3600:
+        return None
 
     peak = 0.0
     peak_time = None
 
     armed = False
+
     reference_ath = None
     drawdown_time = None
     drawdown_low = None
@@ -1438,24 +1209,20 @@ def find_ath_breakout(
 
         if not armed:
 
-            # The old ATH must come from an earlier candle.
             if (
                 peak > 0
                 and peak_time is not None
                 and ts > peak_time
                 and low <= peak * (
-                    1.0 - BREAKOUT_DROP_PERCENT / 100.0
+                    1 - BREAKOUT_DROP_PERCENT / 100
                 )
             ):
 
                 armed = True
-
                 reference_ath = peak
                 drawdown_time = ts
                 drawdown_low = low
 
-                # Do not count a breakout in the same
-                # candle that first confirmed the drop.
                 continue
 
             if high > peak:
@@ -1465,31 +1232,13 @@ def find_ath_breakout(
 
         else:
 
-            drawdown_low = min(
-                drawdown_low,
-                low,
-            )
-
-            # Breakout must occur after the drawdown candle.
-            if (
-                ts > drawdown_time
-                and high > reference_ath
-            ):
-
-                # Record that a breakout occurred.
-                # Final check below verifies the latest
-                # candle is still above the reference ATH.
-                pass
+            drawdown_low = min(drawdown_low, low)
 
     if not armed:
         return None
 
-    if not candles:
-        return None
-
     latest = candles[-1]
 
-    # Current/latest candle wick must break the old ATH.
     if (
         latest["time"] <= drawdown_time
         or latest["high"] <= reference_ath
@@ -1502,24 +1251,17 @@ def find_ath_breakout(
         "drop_percent": (
             (reference_ath - drawdown_low)
             / reference_ath
-        ) * 100.0,
+        ) * 100,
         "breakout_high": latest["high"],
         "breakout_time": latest["time"],
     }
 
 
-def ath_breakout_filter(
-    store: dict,
-    state: dict,
-) -> int:
+def ath_breakout_filter(store, state):
 
     candidates = [
-        candidate
-        for candidate in store.values()
-        if (
-            candidate.get("created_ts")
-            and (candidate.get("price") or 0) > 0
-        )
+        c for c in store.values()
+        if c.get("created_ts") and (c.get("price") or 0) > 0
     ]
 
     candidates.sort(
@@ -1533,19 +1275,11 @@ def ath_breakout_filter(
     if not candidates:
         return 0
 
-    cursor = (
-        int(state.get("breakout_cursor", 0))
-        % len(candidates)
-    )
+    cursor = int(state.get("breakout_cursor", 0)) % len(candidates)
 
-    ordered = (
-        candidates[cursor:]
-        + candidates[:cursor]
-    )
+    ordered = candidates[cursor:] + candidates[:cursor]
 
-    batch = ordered[
-        :MAX_BREAKOUT_CHECKS_PER_RUN
-    ]
+    batch = ordered[:MAX_BREAKOUT_CHECKS_PER_RUN]
 
     state["breakout_cursor"] = (
         cursor + len(batch)
@@ -1565,21 +1299,11 @@ def ath_breakout_filter(
         ):
             continue
 
-        created_ts = candidate.get(
-            "created_ts"
-        )
+        created_ts = candidate.get("created_ts")
 
-        if not created_ts:
-            continue
+        age_days = (time.time() - created_ts) / 86400
 
-        age_days = (
-            time.time() - created_ts
-        ) / 86400.0
-
-        if (
-            age_days <= 0
-            or age_days > BREAKOUT_MAX_AGE_DAYS
-        ):
+        if age_days <= 0 or age_days > BREAKOUT_MAX_AGE_DAYS:
             continue
 
         candles, pool, note = get_daily_candles(
@@ -1590,28 +1314,15 @@ def ath_breakout_filter(
         if not candles:
             continue
 
-        result = find_ath_breakout(
-            candles,
-            created_ts,
-        )
+        result = find_ath_breakout(candles, created_ts)
 
         if not result:
             continue
 
         price = candidate.get("price") or 0
 
-        if price <= 0:
-            continue
-
-        # Require the current market price to remain
-        # above the previous ATH as well.
         if price <= result["previous_ath"]:
             continue
-
-        url = (
-            candidate.get("dex_url")
-            or f"https://dexscreener.com/solana/{mint}"
-        )
 
         breakout_time = datetime.fromtimestamp(
             result["breakout_time"],
@@ -1619,35 +1330,280 @@ def ath_breakout_filter(
         ).strftime("%Y-%m-%d %H:%M UTC")
 
         message = (
-            "🚀 شکست سقف تاریخی پس از ریزش ۷۵٪ | DEX HUNTER V13\n"
+            "🚀 شکست سقف تاریخی پس از ریزش ۷۵٪ | DEX HUNTER V14\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"🏔 ATH قبلی: ${result['previous_ath']:.10g}\n"
-            f"📉 کف ریزش مشاهده‌شده: ${result['drawdown_low']:.10g}\n"
+            f"📉 کف ریزش: ${result['drawdown_low']:.10g}\n"
             f"📊 میزان ریزش: {result['drop_percent']:.1f}%\n"
             f"💥 سقف کندل شکست: ${result['breakout_high']:.10g}\n"
             f"💰 قیمت فعلی: ${price:.10g}\n"
-            f"🕒 زمان کندل شکست: {breakout_time}\n"
-            f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
+            f"🕒 زمان شکست: {breakout_time}\n"
             f"🧾 قرارداد: {mint}\n"
-            f"📈 نمودار: {url}\n"
-            "✅ شرط فیلتر سوم: ریزش حداقل ۷۵٪ از ATH قبلی و شکست مجدد همان ATH\n"
-            "ℹ️ عبور سایه کندل کافی است؛ بسته‌شدن کندل بالای ATH لازم نیست.\n"
+            f"📈 نمودار: {candidate.get('dex_url') or dex_url(mint)}\n"
+            "✅ شرط: ریزش ۷۵٪ و شکست مجدد ATH قبلی\n"
             "⚠️ هشدار تحلیلی است، نه توصیه خرید."
         )
 
-        deliver(
-            state,
-            "ath_breakout",
-            mint,
-            message,
-        )
+        deliver(state, "ath_breakout", mint, message)
 
         matches += 1
 
         time.sleep(1)
 
     return matches
+
+
+# ==================================================
+# NEW: DEXSCREENER LIVE PRICE
+# ==================================================
+
+def get_live_token_data(mint):
+
+    payload = get_json(
+        f"{DEX}/tokens/v1/solana/{mint}"
+    )
+
+    if not isinstance(payload, list) or not payload:
+        return None
+
+    valid_pairs = []
+
+    for pair in payload:
+
+        if not isinstance(pair, dict):
+            continue
+
+        if pair.get("chainId") != "solana":
+            continue
+
+        base = pair.get("baseToken") or {}
+
+        if base.get("address") != mint:
+            continue
+
+        price = as_float(pair.get("priceUsd"))
+
+        if price is None or price <= 0:
+            continue
+
+        liquidity = as_float(
+            (pair.get("liquidity") or {}).get("usd")
+        ) or 0
+
+        valid_pairs.append({
+            "price": price,
+            "liquidity": liquidity,
+            "name": base.get("name"),
+            "symbol": base.get("symbol"),
+            "url": pair.get("url"),
+        })
+
+    if not valid_pairs:
+        return None
+
+    # Highest-liquidity pair is selected.
+
+    valid_pairs.sort(
+        key=lambda x: x["liquidity"],
+        reverse=True,
+    )
+
+    return valid_pairs[0]
+
+
+# ==================================================
+# NEW FILTER 4: ATH RECLAIM BUY ALERT
+# ==================================================
+
+def ath_reclaim_filter(state):
+
+    if not BUY_ALERT_ENABLED:
+        return 0
+
+    watch = state.get("ath_watch", {})
+
+    mints = list(watch.keys())
+
+    if not mints:
+        return 0
+
+    cursor = int(state.get("buy_cursor", 0)) % len(mints)
+
+    ordered = mints[cursor:] + mints[:cursor]
+
+    batch = ordered[:BUY_CHECKS_PER_RUN]
+
+    state["buy_cursor"] = (
+        cursor + len(batch)
+    ) % len(mints)
+
+    save_state(state)
+
+    matches = 0
+
+    for mint in batch:
+
+        info = watch.get(mint)
+
+        if not isinstance(info, dict):
+            continue
+
+        ath = as_float(info.get("ath"))
+
+        if not ath or ath <= 0:
+            continue
+
+        # Check whether all Telegram users
+        # already received this BUY alert.
+
+        if all(
+            f"{mint}|{chat}" in state["sent"]["ath_reclaim"]
+            for chat in CHAT_IDS
+        ):
+            continue
+
+        live = get_live_token_data(mint)
+
+        if not live:
+            continue
+
+        price = live["price"]
+
+        threshold = ath * (
+            BUY_ATH_THRESHOLD_PERCENT / 100
+        )
+
+        if price < threshold:
+            continue
+
+        distance = ((price / ath) - 1) * 100
+
+        name = live.get("name") or info.get("name") or "Unknown"
+        symbol = live.get("symbol") or info.get("symbol") or "???"
+
+        chart = live.get("url") or dex_url(mint)
+
+        message = (
+            "🟢🚨🚨 ATH RECLAIM BUY SIGNAL 🚨🚨🟢\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🟢 هشدار جدی بازگشت به سقف تاریخی\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 نام توکن: {name}\n"
+            f"🔖 نماد: {symbol}\n"
+            f"🏔 سقف تاریخی ذخیره‌شده: ${ath:.12g}\n"
+            f"💰 قیمت لحظه‌ای: ${price:.12g}\n"
+            f"📊 فاصله از ATH: {distance:+.2f}%\n"
+            f"📈 حد هشدار: {BUY_ATH_THRESHOLD_PERCENT}% ATH\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🟢 وضعیت: ATH RECLAIM DETECTED\n"
+            "🟢 سیگنال: BUY ALERT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🧾 آدرس قرارداد:\n{mint}\n"
+            f"🔗 نمودار و بررسی خرید:\n{chart}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ این هشدار صرفاً بازگشت قیمت به محدوده ATH را نشان می‌دهد؛ "
+            "تضمین شکست پایدار یا سود نیست.\n"
+            "⚠️ نقدینگی، اسلیپیج و امنیت قرارداد را بررسی کنید."
+        )
+
+        deliver(
+            state,
+            "ath_reclaim",
+            mint,
+            message,
+        )
+
+        matches += 1
+
+        logging.info(
+            "ATH RECLAIM BUY ALERT: %s | price=%s | ATH=%s",
+            mint,
+            price,
+            ath,
+        )
+
+        time.sleep(0.5)
+
+    return matches
+
+
+# ==================================================
+# MIGRATION: OLD V13 ATH ALERTS
+# ==================================================
+
+def migrate_old_ath_alerts(store, state):
+
+    """
+    Old V13 sent.ath records did not store ATH.
+    Recover ATH for previously alerted tokens
+    when they are still present in current sources.
+    """
+
+    known = state["ath_watch"]
+
+    old_mints = set()
+
+    for item in state["sent"]["ath"]:
+
+        if "|" in item:
+            old_mints.add(item.split("|", 1)[0])
+
+    missing = [
+        mint for mint in old_mints
+        if mint not in known
+    ]
+
+    recovered = 0
+
+    for mint in missing[:MAX_ATH_CHECKS_PER_RUN]:
+
+        candidate = store.get(mint)
+
+        if not candidate:
+            continue
+
+        created_ts = candidate.get("created_ts")
+
+        if not created_ts:
+            continue
+
+        ath, note = observed_ath(mint, created_ts)
+
+        if not ath:
+            continue
+
+        price = candidate.get("price") or 0
+
+        if price <= 0:
+            continue
+
+        drop = ((ath - price) / ath) * 100
+
+        if drop < ATH_MIN_DROP_PERCENT:
+            continue
+
+        known[mint] = {
+            "ath": ath,
+            "name": candidate.get("name", "Unknown"),
+            "symbol": candidate.get("symbol", "???"),
+            "sources": sorted(candidate.get("sources", [])),
+            "url": candidate.get("dex_url") or dex_url(mint),
+            "created_ts": created_ts,
+            "registered_at": time.time(),
+        }
+
+        recovered += 1
+
+    if recovered:
+        save_state(state)
+
+    logging.info(
+        "Legacy ATH records recovered: %d",
+        recovered,
+    )
+
+    return recovered
 
 
 # ==================================================
@@ -1666,11 +1622,10 @@ def main():
 
     candidates = {}
 
-    logging.info(
-        "DEX HUNTER V13 scan started"
-    )
+    logging.info("DEX HUNTER V14 scan started")
 
-    # Four independent sources.
+    # FOUR ORIGINAL SOURCES
+
     source_dexscreener(candidates)
     source_geckoterminal(candidates)
     source_pump_fun(candidates)
@@ -1681,57 +1636,67 @@ def main():
         len(candidates),
     )
 
-    enrich_from_dexscreener(
-        candidates
-    )
+    enrich_from_dexscreener(candidates)
+
+    # RESTORE OLD V13 TRACKING WHEN POSSIBLE
+
+    migrate_old_ath_alerts(candidates, state)
 
     with_age = sum(
-        1
-        for c in candidates.values()
+        1 for c in candidates.values()
         if token_age_info(c)[0] is not None
     )
 
     with_volume = sum(
-        1
-        for c in candidates.values()
+        1 for c in candidates.values()
         if c.get("volume_24h") is not None
     )
 
     with_market_cap = sum(
-        1
-        for c in candidates.values()
+        1 for c in candidates.values()
         if c.get("market_cap") is not None
     )
 
-    logging.info(
-        "Data coverage | age=%d | volume=%d | market_cap=%d",
-        with_age,
-        with_volume,
-        with_market_cap,
-    )
-
     # FILTER 2
+
     volume_count = volume_filter(
         candidates,
         state,
     )
 
     # FILTER 1
+
     ath_count = ath_filter(
         candidates,
         state,
     )
 
     # FILTER 3
+
     breakout_count = ath_breakout_filter(
         candidates,
+        state,
+    )
+
+    # FILTER 4 - NEW
+
+    buy_count = ath_reclaim_filter(
         state,
     )
 
     save_state(state)
 
     logging.info(
-        "Scan complete | tokens=%d | age_data=%d | volume_data=%d | market_cap_data=%d | volume=%d | ath=%d | ath_breakout=%d",
+        "V14 COMPLETE | "
+        "tokens=%d | "
+        "age=%d | "
+        "volume_data=%d | "
+        "market_cap=%d | "
+        "volume_alerts=%d | "
+        "ath_alerts=%d | "
+        "breakout_alerts=%d | "
+        "buy_alerts=%d | "
+        "tracked_ath_tokens=%d",
         len(candidates),
         with_age,
         with_volume,
@@ -1739,6 +1704,8 @@ def main():
         volume_count,
         ath_count,
         breakout_count,
+        buy_count,
+        len(state["ath_watch"]),
     )
 
 
