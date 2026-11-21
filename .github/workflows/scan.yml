@@ -1,5 +1,5 @@
 
-name: DEX Hunter V15
+name: DEX Hunter V16
 
 on:
   schedule:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -34,9 +34,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests matplotlib
 
-      - name: Run DEX Hunter V15
+      - name: Run DEX Hunter V16
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
         run: |
           python bot.py
 
@@ -46,5 +48,5 @@ jobs:
           git config user.name "DEX Hunter"
           git config user.email "dex-hunter@users.noreply.github.com"
           git add seen.json
-          git diff --cached --quiet || git commit -m "Update DEX Hunter tracking database"
+          git diff --cached --quiet || git commit -m "Update DEX Hunter V16 tracking database"
           git push
