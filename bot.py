@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V14
+DEX HUNTER V15
 
 SOURCES:
 1. DexScreener
@@ -15,22 +15,19 @@ FILTER 1: ATH DROP
 Market cap >= $50,000
 Price >= 30% below observed ATH
 
-FILTER 2: VOLUME
-Token age > 1 day
-24h volume >= $500,000
-
-FILTER 3: ATH BREAKOUT
+FILTER 2: ATH BREAKOUT
 Previous ATH identified
 Price drops >= 75% below ATH
-Later candle high breaks same ATH
-Close above ATH NOT required
+Later daily candle high breaks same ATH
 
-NEW FILTER 4: ATH RECLAIM BUY
-Only tokens previously alerted by ATH DROP.
+FILTER 3: ATH RECLAIM BUY
+Only tokens previously registered by ATH DROP.
 Persistent tracking in seen.json.
 Price >= 99.5% of stored ATH.
 Independent DexScreener monitoring.
 One BUY alert per token per Telegram chat.
+
+VOLUME FILTER: REMOVED COMPLETELY.
 
 Alerts only. No automatic trading.
 """
@@ -42,7 +39,6 @@ import time
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
 
 import requests
 
@@ -61,23 +57,18 @@ CHAT_IDS = [
     "1012061523",
 ]
 
-# FILTER 1
+# FILTER 1: ATH DROP
 
 ATH_MIN_MARKET_CAP_USD = 50_000
 ATH_MIN_DROP_PERCENT = 30.0
 
-# FILTER 2
-
-VOLUME_MIN_AGE_DAYS = 1
-VOLUME_MIN_24H_USD = 500_000
-
-# FILTER 3
+# FILTER 2: ATH BREAKOUT
 
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_HISTORY_LIMIT = 1000
 BREAKOUT_MAX_AGE_DAYS = 990
 
-# FILTER 4 - NEW BUY ALERT
+# FILTER 3: ATH RECLAIM BUY
 
 BUY_ATH_THRESHOLD_PERCENT = 99.5
 BUY_CHECKS_PER_RUN = 30
@@ -97,7 +88,7 @@ PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V14/1.0",
+    "User-Agent": "DEX-HUNTER-V15/1.0",
     "Accept": "application/json",
 }
 
@@ -476,16 +467,6 @@ def normalize(row, source):
         attrs.get("creation_timestamp"),
     )
 
-    volume_data = first(
-        attrs.get("volume_usd"),
-        row.get("volume"),
-        row.get("volume_usd"),
-        {},
-    )
-
-    if not isinstance(volume_data, dict):
-        volume_data = {}
-
     return {
         "mint": mint,
 
@@ -519,16 +500,6 @@ def normalize(row, source):
             row.get("usd_market_cap"),
             row.get("marketCapUsd"),
             attrs.get("market_cap_usd"),
-        )),
-
-        "volume_24h": as_float(first(
-            row.get("volume24h"),
-            row.get("volume_24h"),
-            row.get("volume24hUsd"),
-            row.get("volume_24h_usd"),
-            row.get("volumeUsd24h"),
-            volume_data.get("h24"),
-            volume_data.get("24h"),
         )),
 
         "created_ts": parse_timestamp(created),
@@ -580,14 +551,6 @@ def add_candidate(store, candidate):
         ) and candidate.get(field) is not None:
 
             old[field] = candidate[field]
-
-    new_volume = candidate.get("volume_24h")
-    old_volume = old.get("volume_24h")
-
-    if new_volume is not None:
-
-        if old_volume is None or new_volume > old_volume:
-            old["volume_24h"] = new_volume
 
 
 # ==================================================
@@ -683,7 +646,6 @@ def source_geckoterminal(store):
                         "name": attrs.get("name"),
                         "price_usd": attrs.get("base_token_price_usd"),
                         "created_at": attrs.get("pool_created_at"),
-                        "volume": attrs.get("volume_usd"),
                         "url": attrs.get("url"),
                     },
                     "GeckoTerminal",
@@ -779,17 +741,6 @@ def enrich_from_dexscreener(store):
             liquidity = as_float(
                 (pair.get("liquidity") or {}).get("usd")
             ) or 0.0
-
-            pair_volume = as_float(
-                (pair.get("volume") or {}).get("h24")
-            )
-
-            if pair_volume is not None:
-
-                old_volume = candidate.get("volume_24h")
-
-                if old_volume is None or pair_volume > old_volume:
-                    candidate["volume_24h"] = pair_volume
 
             pair_created = parse_timestamp(
                 pair.get("pairCreatedAt")
@@ -979,97 +930,6 @@ def observed_ath(mint, created_ts):
 
 
 # ==================================================
-# TOKEN AGE
-# ==================================================
-
-def token_age_info(candidate):
-
-    created = candidate.get("created_ts")
-
-    if created:
-
-        age = max(
-            0.0,
-            (time.time() - created) / 86400,
-        )
-
-        return age, "زمان ایجاد توکن"
-
-    pair_created = candidate.get("pair_created_ts")
-
-    if pair_created:
-
-        age = max(
-            0.0,
-            (time.time() - pair_created) / 86400,
-        )
-
-        return age, "عمر تخمینی بر اساس زمان ایجاد استخر"
-
-    return None, None
-
-
-# ==================================================
-# FILTER 2: VOLUME
-# ==================================================
-
-def volume_filter(store, state):
-
-    matches = 0
-
-    for candidate in store.values():
-
-        age, age_note = token_age_info(candidate)
-
-        volume = candidate.get("volume_24h")
-
-        if age is None or age <= VOLUME_MIN_AGE_DAYS:
-            continue
-
-        if volume is None or volume < VOLUME_MIN_24H_USD:
-            continue
-
-        mint = candidate["mint"]
-
-        if all(
-            f"{mint}|{chat}" in state["sent"]["volume"]
-            for chat in CHAT_IDS
-        ):
-            continue
-
-        market_cap = candidate.get("market_cap")
-
-        market_cap_text = (
-            f"${market_cap:,.0f}"
-            if market_cap is not None
-            else "نامشخص"
-        )
-
-        url = candidate.get("dex_url") or dex_url(mint)
-
-        message = (
-            "🔥 شکار حجم معاملات | DEX HUNTER V14\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
-            f"⏳ عمر: {age:.1f} روز\n"
-            f"🕒 مبنای عمر: {age_note}\n"
-            f"📦 حجم ۲۴ ساعته: ${volume:,.0f}\n"
-            f"📊 مارکت‌کپ: {market_cap_text}\n"
-            f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
-            f"🧾 قرارداد: {mint}\n"
-            f"📈 نمودار: {url}\n"
-            "✅ شرط: عمر بالای یک روز و حجم حداقل ۵۰۰ هزار دلار\n"
-            "⚠️ هشدار تحلیلی است، نه توصیه خرید."
-        )
-
-        deliver(state, "volume", mint, message)
-
-        matches += 1
-
-    return matches
-
-
-# ==================================================
 # FILTER 1: ATH DROP
 # ==================================================
 
@@ -1125,9 +985,6 @@ def ath_filter(store, state):
         if drop < ATH_MIN_DROP_PERCENT:
             continue
 
-        # NEW: Persistent ATH tracking.
-        # Keep the highest recorded ATH for this token.
-
         watch = state["ath_watch"].get(mint, {})
 
         previous_ath = as_float(watch.get("ath")) or 0
@@ -1146,8 +1003,6 @@ def ath_filter(store, state):
 
         save_state(state)
 
-        # Do not repeat the original ATH drop alert.
-
         if all(
             f"{mint}|{chat}" in state["sent"]["ath"]
             for chat in CHAT_IDS
@@ -1155,7 +1010,7 @@ def ath_filter(store, state):
             continue
 
         message = (
-            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V14\n"
+            "🎯 شکار ریزش از سقف تاریخی | DEX HUNTER V15\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"💰 قیمت فعلی: ${price:.10g}\n"
@@ -1181,7 +1036,7 @@ def ath_filter(store, state):
 
 
 # ==================================================
-# FILTER 3: ATH BREAKOUT
+# FILTER 2: ATH BREAKOUT
 # ==================================================
 
 def find_ath_breakout(candles, created_ts):
@@ -1267,7 +1122,6 @@ def ath_breakout_filter(store, state):
     candidates.sort(
         key=lambda x: (
             x.get("liquidity") or 0,
-            x.get("volume_24h") or 0,
         ),
         reverse=True,
     )
@@ -1330,7 +1184,7 @@ def ath_breakout_filter(store, state):
         ).strftime("%Y-%m-%d %H:%M UTC")
 
         message = (
-            "🚀 شکست سقف تاریخی پس از ریزش ۷۵٪ | DEX HUNTER V14\n"
+            "🚀 شکست سقف تاریخی پس از ریزش ۷۵٪ | DEX HUNTER V15\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
             f"🏔 ATH قبلی: ${result['previous_ath']:.10g}\n"
@@ -1355,7 +1209,7 @@ def ath_breakout_filter(store, state):
 
 
 # ==================================================
-# NEW: DEXSCREENER LIVE PRICE
+# DEXSCREENER LIVE PRICE
 # ==================================================
 
 def get_live_token_data(mint):
@@ -1402,8 +1256,6 @@ def get_live_token_data(mint):
     if not valid_pairs:
         return None
 
-    # Highest-liquidity pair is selected.
-
     valid_pairs.sort(
         key=lambda x: x["liquidity"],
         reverse=True,
@@ -1413,7 +1265,7 @@ def get_live_token_data(mint):
 
 
 # ==================================================
-# NEW FILTER 4: ATH RECLAIM BUY ALERT
+# FILTER 3: ATH RECLAIM BUY ALERT
 # ==================================================
 
 def ath_reclaim_filter(state):
@@ -1453,9 +1305,6 @@ def ath_reclaim_filter(state):
 
         if not ath or ath <= 0:
             continue
-
-        # Check whether all Telegram users
-        # already received this BUY alert.
 
         if all(
             f"{mint}|{chat}" in state["sent"]["ath_reclaim"]
@@ -1529,18 +1378,10 @@ def ath_reclaim_filter(state):
 
 
 # ==================================================
-# MIGRATION: OLD V13 ATH ALERTS
+# MIGRATION: OLD V13/V14 ATH ALERTS
 # ==================================================
 
 def migrate_old_ath_alerts(store, state):
-
-    """
-    Old V13 sent.ath records did not store ATH.
-    Recover ATH for previously alerted tokens
-    when they are still present in current sources.
-    """
-
-    known = state["ath_watch"]
 
     old_mints = set()
 
@@ -1551,7 +1392,7 @@ def migrate_old_ath_alerts(store, state):
 
     missing = [
         mint for mint in old_mints
-        if mint not in known
+        if mint not in state["ath_watch"]
     ]
 
     recovered = 0
@@ -1583,7 +1424,7 @@ def migrate_old_ath_alerts(store, state):
         if drop < ATH_MIN_DROP_PERCENT:
             continue
 
-        known[mint] = {
+        state["ath_watch"][mint] = {
             "ath": ath,
             "name": candidate.get("name", "Unknown"),
             "symbol": candidate.get("symbol", "???"),
@@ -1622,7 +1463,7 @@ def main():
 
     candidates = {}
 
-    logging.info("DEX HUNTER V14 scan started")
+    logging.info("DEX HUNTER V15 scan started")
 
     # FOUR ORIGINAL SOURCES
 
@@ -1638,47 +1479,30 @@ def main():
 
     enrich_from_dexscreener(candidates)
 
-    # RESTORE OLD V13 TRACKING WHEN POSSIBLE
+    # RESTORE OLD ATH TRACKING WHEN POSSIBLE
 
     migrate_old_ath_alerts(candidates, state)
-
-    with_age = sum(
-        1 for c in candidates.values()
-        if token_age_info(c)[0] is not None
-    )
-
-    with_volume = sum(
-        1 for c in candidates.values()
-        if c.get("volume_24h") is not None
-    )
 
     with_market_cap = sum(
         1 for c in candidates.values()
         if c.get("market_cap") is not None
     )
 
-    # FILTER 2
-
-    volume_count = volume_filter(
-        candidates,
-        state,
-    )
-
-    # FILTER 1
+    # FILTER 1: ATH DROP
 
     ath_count = ath_filter(
         candidates,
         state,
     )
 
-    # FILTER 3
+    # FILTER 2: ATH BREAKOUT
 
     breakout_count = ath_breakout_filter(
         candidates,
         state,
     )
 
-    # FILTER 4 - NEW
+    # FILTER 3: ATH RECLAIM BUY
 
     buy_count = ath_reclaim_filter(
         state,
@@ -1687,21 +1511,15 @@ def main():
     save_state(state)
 
     logging.info(
-        "V14 COMPLETE | "
+        "V15 COMPLETE | "
         "tokens=%d | "
-        "age=%d | "
-        "volume_data=%d | "
-        "market_cap=%d | "
-        "volume_alerts=%d | "
+        "market_cap_data=%d | "
         "ath_alerts=%d | "
         "breakout_alerts=%d | "
         "buy_alerts=%d | "
         "tracked_ath_tokens=%d",
         len(candidates),
-        with_age,
-        with_volume,
         with_market_cap,
-        volume_count,
         ath_count,
         breakout_count,
         buy_count,
