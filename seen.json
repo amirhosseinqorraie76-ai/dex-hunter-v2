@@ -8,7 +8,11 @@
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|1012061523",
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|1507608801",
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|6665909136",
-      "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|98529959"
+      "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|98529959",
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1012061523",
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1507608801",
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|6665909136",
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959"
     ],
     "volume": [
       "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1012061523",
@@ -113,9 +117,20 @@
       "url": "https://dexscreener.com/solana/zxtpi4btawx3mgdapoezkmd1hxx8cdecfrqxmwvsclx",
       "created_ts": 1786531900.0,
       "registered_at": 1795291635.0079234
+    },
+    "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump": {
+      "ath": 0.13074717978094758,
+      "name": "Catecoin",
+      "symbol": "CATE",
+      "sources": [
+        "GeckoTerminal"
+      ],
+      "url": "https://dexscreener.com/solana/hmzvseemtzhhvznw9uwbag85hctmfnkbhzux16cy7ca3",
+      "created_ts": 1785083563.0,
+      "registered_at": 1795291961.5282185
     }
   },
-  "ath_cursor": 5,
-  "breakout_cursor": 5,
+  "ath_cursor": 10,
+  "breakout_cursor": 10,
   "buy_cursor": 0
 }
