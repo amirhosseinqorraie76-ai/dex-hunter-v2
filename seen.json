@@ -37,6 +37,10 @@
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|1507608801",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|6665909136",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|98529959",
+      "Hg5Ja55T5wESq4vyFoiVCMeHXtGyVA69X2UHq8hgpump|1012061523",
+      "Hg5Ja55T5wESq4vyFoiVCMeHXtGyVA69X2UHq8hgpump|1507608801",
+      "Hg5Ja55T5wESq4vyFoiVCMeHXtGyVA69X2UHq8hgpump|6665909136",
+      "Hg5Ja55T5wESq4vyFoiVCMeHXtGyVA69X2UHq8hgpump|98529959",
       "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|1012061523",
       "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|1507608801",
       "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|6665909136",
@@ -121,7 +125,11 @@
       "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn|98529959"
     ],
     "ath_breakout": [],
-    "ath_reclaim": []
+    "ath_reclaim": [],
+    "breakout": [],
+    "watch": [],
+    "recovery": [],
+    "strong": []
   },
   "ath_watch": {
     "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": {
@@ -235,10 +243,18 @@
       "url": "https://dexscreener.com/solana/58xqwpxdgp3gfu9dafxs8c1gjwtldhdqhjrofaf5ywtv",
       "created_ts": 1795205185.0,
       "registered_at": 1795298200.652544
+    },
+    "Hg5Ja55T5wESq4vyFoiVCMeHXtGyVA69X2UHq8hgpump": {
+      "ath": 0.020693303644078592,
+      "name": "baton",
+      "symbol": "baton",
+      "created_ts": 1788985935.0,
+      "registered_at": 1795299227.6274219,
+      "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 11,
-  "breakout_cursor": 3,
+  "ath_cursor": 16,
+  "breakout_cursor": 8,
   "buy_cursor": 0,
   "telegram_update_offset": 435217149
 }
