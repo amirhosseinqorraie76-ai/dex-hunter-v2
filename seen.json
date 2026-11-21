@@ -25,6 +25,10 @@
       "ApZuxdpzMrbEYTGEzeY9afh5pj9d6qPRJCTgQYiipbKg|1507608801",
       "ApZuxdpzMrbEYTGEzeY9afh5pj9d6qPRJCTgQYiipbKg|6665909136",
       "ApZuxdpzMrbEYTGEzeY9afh5pj9d6qPRJCTgQYiipbKg|98529959",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1012061523",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1507608801",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|6665909136",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|98529959",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|1012061523",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|1507608801",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|6665909136",
@@ -205,10 +209,21 @@
       "url": "https://dexscreener.com/solana/4s8cabvgadhopkkbitjdqz4tfqxkuczhwdfy8hlvubdq",
       "created_ts": 1794364063.0,
       "registered_at": 1795293003.5821605
+    },
+    "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump": {
+      "ath": 0.0036031421671665078,
+      "name": "Fiona the Hippo",
+      "symbol": "FIONA",
+      "sources": [
+        "GeckoTerminal"
+      ],
+      "url": "https://dexscreener.com/solana/djbltx1hrgzzrjgj7cwtx6sn3d7tbliytkgwombuwtvb",
+      "created_ts": 1795121609.0,
+      "registered_at": 1795296876.3012352
     }
   },
-  "ath_cursor": 15,
-  "breakout_cursor": 20,
+  "ath_cursor": 0,
+  "breakout_cursor": 25,
   "buy_cursor": 0,
   "telegram_update_offset": 435217142
 }
