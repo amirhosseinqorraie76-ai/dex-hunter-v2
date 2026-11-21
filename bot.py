@@ -1,15 +1,15 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V15
+DEX HUNTER V16 + MULTI-SOURCE DISCOVERY + CHART FALLBACKS
 
 SOURCES:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
+5. VoidScreener (best-effort; public API)
 
 FILTER 1: ATH DROP
 Market cap >= $50,000
@@ -27,18 +27,18 @@ Price >= 99.5% of stored ATH.
 Independent DexScreener monitoring.
 One BUY alert per token per Telegram chat.
 
-TELEGRAM CHART REQUEST:
-Forward a Telegram channel post to the bot.
-Extract Solana contract address.
-Send exactly two candlestick charts:
-4H and 1D.
-No API_ID, API_HASH or Telethon.
-
 VOLUME FILTER: REMOVED COMPLETELY.
+
+NEW:
+Forward a Telegram channel post to this bot in a private chat.
+If a Solana contract address is found, send only:
+- 4-hour candlestick chart
+- Daily candlestick chart
+
+Charts contain candles only: no indicators, RSI, MACD, or volume.
 Alerts only. No automatic trading.
 """
 
-import io
 import json
 import logging
 import os
@@ -49,11 +49,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-
 import matplotlib
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 
 
@@ -62,6 +63,8 @@ from matplotlib.patches import Rectangle
 # ==================================================
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "").strip()
 
 CHAT_IDS = [
     "6665909136",
@@ -71,13 +74,16 @@ CHAT_IDS = [
     "1012061523",
 ]
 
+# FILTER 1: ATH DROP
 ATH_MIN_MARKET_CAP_USD = 50_000
 ATH_MIN_DROP_PERCENT = 30.0
 
+# FILTER 2: ATH BREAKOUT
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_HISTORY_LIMIT = 1000
 BREAKOUT_MAX_AGE_DAYS = 990
 
+# FILTER 3: ATH RECLAIM BUY
 BUY_ATH_THRESHOLD_PERCENT = 99.5
 BUY_CHECKS_PER_RUN = 30
 BUY_ALERT_ENABLED = True
@@ -90,21 +96,33 @@ MAX_BREAKOUT_CHECKS_PER_RUN = 5
 
 HTTP_TIMEOUT = 20
 
-DEX = "https://api.dexscreener.com"
-GECKO = "https://api.geckoterminal.com/api/v2"
-PUMP = "https://frontend-api-v3.pump.fun"
-STONK = "https://www.stonkfun.xyz/api/public/v1"
+# Telegram incoming-message settings
+TELEGRAM_UPDATES_LIMIT = 30
 
-HEADERS = {
-    "User-Agent": "DEX-HUNTER-V15/1.0",
-    "Accept": "application/json",
-}
+# Chart settings
+CHART_4H_LIMIT = 100
+CHART_1D_LIMIT = 100
+CHART_OUTPUT_DIR = Path("charts")
 
-BASE58_PATTERN = re.compile(
+# Solana base58 address. Address is verified against DexScreener afterwards.
+SOLANA_ADDRESS_PATTERN = re.compile(
     r"(?<![1-9A-HJ-NP-Za-km-z])"
     r"[1-9A-HJ-NP-Za-km-z]{32,44}"
     r"(?![1-9A-HJ-NP-Za-km-z])"
 )
+
+DEX = "https://api.dexscreener.com"
+GECKO = "https://api.geckoterminal.com/api/v2"
+PUMP = "https://frontend-api-v3.pump.fun"
+STONK = "https://www.stonkfun.xyz/api/public/v1"
+VOID = "https://api.voidscreener.com"
+COINGECKO_ONCHAIN = "https://api.coingecko.com/api/v3/onchain"
+MORALIS = "https://solana-gateway.moralis.io"
+
+HEADERS = {
+    "User-Agent": "DEX-HUNTER-V16/1.0",
+    "Accept": "application/json",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -207,10 +225,7 @@ def rows_from(payload):
     if not isinstance(payload, dict):
         return []
 
-    for key in (
-        "tokens", "coins", "items",
-        "results", "pools", "data",
-    ):
+    for key in ("tokens", "coins", "items", "results", "pools", "data"):
 
         value = payload.get(key)
 
@@ -218,19 +233,11 @@ def rows_from(payload):
             return [x for x in value if isinstance(x, dict)]
 
         if isinstance(value, dict):
-
-            for nested in (
-                "tokens", "coins", "items",
-                "results", "pools",
-            ):
-
+            for nested in ("tokens", "coins", "items", "results", "pools"):
                 inner = value.get(nested)
 
                 if isinstance(inner, list):
-                    return [
-                        x for x in inner
-                        if isinstance(x, dict)
-                    ]
+                    return [x for x in inner if isinstance(x, dict)]
 
     return []
 
@@ -260,13 +267,10 @@ def empty_state():
             "ath_breakout": [],
             "ath_reclaim": [],
         },
-
         "ath_watch": {},
-
         "ath_cursor": 0,
         "breakout_cursor": 0,
         "buy_cursor": 0,
-
         "telegram_update_offset": 0,
     }
 
@@ -282,7 +286,6 @@ def load_state():
         )
 
         default = empty_state()
-
         state.setdefault("sent", {})
 
         for key in default["sent"]:
@@ -306,11 +309,7 @@ def save_state(state):
     temp = STATE_FILE.with_suffix(".tmp")
 
     temp.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -318,7 +317,7 @@ def save_state(state):
 
 
 # ==================================================
-# TELEGRAM MESSAGE
+# TELEGRAM OUTGOING
 # ==================================================
 
 def send_telegram(chat_id, message):
@@ -346,15 +345,11 @@ def send_telegram(chat_id, message):
         return bool(response.json().get("ok"))
 
     except Exception as exc:
-        logging.warning(
-            "Telegram failed %s: %s",
-            chat_id,
-            exc,
-        )
+        logging.warning("Telegram failed %s: %s", chat_id, exc)
         return False
 
 
-def send_telegram_photo(chat_id, image_buffer):
+def send_telegram_photo(chat_id, photo_path):
 
     if not BOT_TOKEN:
         return False
@@ -365,26 +360,19 @@ def send_telegram_photo(chat_id, image_buffer):
     )
 
     try:
-        image_buffer.seek(0)
-
-        response = session.post(
-            url,
-            data={"chat_id": chat_id},
-            files={
-                "photo": (
-                    "chart.png",
-                    image_buffer,
-                    "image/png",
-                )
-            },
-            timeout=HTTP_TIMEOUT,
-        )
+        with open(photo_path, "rb") as photo:
+            response = session.post(
+                url,
+                data={"chat_id": chat_id},
+                files={"photo": photo},
+                timeout=HTTP_TIMEOUT,
+            )
 
         response.raise_for_status()
         return bool(response.json().get("ok"))
 
     except Exception as exc:
-        logging.warning("Telegram photo failed: %s", exc)
+        logging.warning("Telegram photo failed %s: %s", chat_id, exc)
         return False
 
 
@@ -426,7 +414,6 @@ def normalize(row, source):
     base_rel = rels.get("base_token") or {}
     base_data = base_rel.get("data") or {}
     base_id = base_data.get("id")
-
     base = row.get("baseToken") or {}
 
     mint = first(
@@ -464,7 +451,6 @@ def normalize(row, source):
 
     return {
         "mint": mint,
-
         "name": str(first(
             row.get("name"),
             row.get("tokenName"),
@@ -472,7 +458,6 @@ def normalize(row, source):
             attrs.get("name"),
             "Unknown",
         )),
-
         "symbol": str(first(
             row.get("symbol"),
             row.get("ticker"),
@@ -480,15 +465,12 @@ def normalize(row, source):
             attrs.get("symbol"),
             "???",
         )),
-
         "sources": {source},
-
         "price": as_float(first(
             row.get("priceUsd"),
             row.get("price_usd"),
             attrs.get("base_token_price_usd"),
         )),
-
         "market_cap": as_float(first(
             row.get("marketCap"),
             row.get("market_cap"),
@@ -496,21 +478,14 @@ def normalize(row, source):
             row.get("marketCapUsd"),
             attrs.get("market_cap_usd"),
         )),
-
         "created_ts": parse_timestamp(created),
-
         "pair_created_ts": parse_timestamp(first(
             row.get("pairCreatedAt"),
             row.get("pair_created_at"),
             attrs.get("pair_created_at"),
             attrs.get("pool_created_at"),
         )),
-
-        "dex_url": first(
-            row.get("url"),
-            attrs.get("url"),
-        ),
-
+        "dex_url": first(row.get("url"), attrs.get("url")),
         "liquidity": 0.0,
     }
 
@@ -533,12 +508,10 @@ def add_candidate(store, candidate):
         "name", "symbol", "price", "market_cap",
         "created_ts", "pair_created_ts", "dex_url",
     ):
-
         if (
             old.get(field) is None
             or old.get(field) in ("Unknown", "???")
         ) and candidate.get(field) is not None:
-
             old[field] = candidate[field]
 
 
@@ -603,7 +576,6 @@ def source_geckoterminal(store):
         for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
 
             rels = row.get("relationships") or {}
-
             base_data = (
                 (rels.get("base_token") or {}).get("data") or {}
             )
@@ -675,6 +647,25 @@ def source_stonk_fun(store):
 
 
 # ==================================================
+# SOURCE 5: VOIDSCREENER (PUBLIC API, BEST-EFFORT)
+# ==================================================
+def source_voidscreener(store):
+    # The public API has changed over time and may be temporarily unavailable.
+    # Each endpoint is isolated so a failure never stops the other sources.
+    for endpoint in ("/api-tokens", "/api-trending"):
+        payload = get_json(f"{VOID}{endpoint}")
+        rows = rows_from(payload)
+        if not rows and isinstance(payload, list):
+            rows = [x for x in payload if isinstance(x, dict)]
+        for row in rows[:MAX_SOURCE_ROWS]:
+            chain = str(first(row.get("chain"), row.get("chainId"), row.get("network"), "solana")).lower()
+            if chain not in ("solana", "sol"):
+                continue
+            add_candidate(store, normalize(row, "VoidScreener"))
+
+
+
+# ==================================================
 # DEXSCREENER ENRICHMENT
 # ==================================================
 
@@ -708,7 +699,6 @@ def enrich_from_dexscreener(store):
                 continue
 
             candidate = store[mint]
-
             candidate["name"] = base.get("name") or candidate["name"]
             candidate["symbol"] = base.get("symbol") or candidate["symbol"]
 
@@ -716,9 +706,7 @@ def enrich_from_dexscreener(store):
                 (pair.get("liquidity") or {}).get("usd")
             ) or 0.0
 
-            pair_created = parse_timestamp(
-                pair.get("pairCreatedAt")
-            )
+            pair_created = parse_timestamp(pair.get("pairCreatedAt"))
 
             if pair_created:
                 old_created = candidate.get("pair_created_ts")
@@ -729,18 +717,15 @@ def enrich_from_dexscreener(store):
             if liquidity >= candidate.get("liquidity", 0):
 
                 candidate["liquidity"] = liquidity
-
                 candidate["price"] = (
                     as_float(pair.get("priceUsd"))
                     or candidate.get("price")
                 )
-
                 candidate["market_cap"] = (
                     as_float(pair.get("marketCap"))
                     or as_float(pair.get("fdv"))
                     or candidate.get("market_cap")
                 )
-
                 candidate["dex_url"] = (
                     pair.get("url")
                     or candidate.get("dex_url")
@@ -766,7 +751,6 @@ def gecko_best_pool(mint):
 
         attrs = row.get("attributes") or {}
         rels = row.get("relationships") or {}
-
         pool_id = row.get("id")
 
         pool_address = (
@@ -802,9 +786,7 @@ def gecko_best_pool(mint):
         else:
             continue
 
-        liquidity = as_float(
-            attrs.get("reserve_in_usd")
-        ) or 0.0
+        liquidity = as_float(attrs.get("reserve_in_usd")) or 0.0
 
         if pool_address and liquidity > best_liquidity:
             best_pool = pool_address
@@ -815,7 +797,7 @@ def gecko_best_pool(mint):
 
 
 # ==================================================
-# DAILY CANDLES FOR ATH FILTERS
+# DAILY CANDLES (ORIGINAL FILTER LOGIC)
 # ==================================================
 
 def get_daily_candles(mint, limit=1000):
@@ -872,184 +854,6 @@ def get_daily_candles(mint, limit=1000):
 
 
 # ==================================================
-# CHART CANDLES: 4H AND 1D
-# ==================================================
-
-def get_chart_candles(mint, timeframe):
-
-    pool, side = gecko_best_pool(mint)
-
-    if not pool or not side:
-        logging.warning("No Gecko pool for chart: %s", mint)
-        return None
-
-    if timeframe == "4H":
-        endpoint = "hour"
-        aggregate = 4
-        limit = 120
-
-    elif timeframe == "1D":
-        endpoint = "day"
-        aggregate = 1
-        limit = 120
-
-    else:
-        return None
-
-    payload = get_json(
-        f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{endpoint}",
-        {
-            "aggregate": aggregate,
-            "limit": limit,
-            "currency": "usd",
-            "token": side,
-        },
-    )
-
-    try:
-        rows = payload["data"]["attributes"]["ohlcv_list"]
-    except Exception:
-        logging.warning(
-            "%s candles unavailable for %s",
-            timeframe,
-            mint,
-        )
-        return None
-
-    candles = []
-
-    for row in rows:
-
-        if not isinstance(row, list) or len(row) < 5:
-            continue
-
-        ts = as_float(row[0])
-        open_price = as_float(row[1])
-        high = as_float(row[2])
-        low = as_float(row[3])
-        close = as_float(row[4])
-
-        if any(
-            value is None
-            for value in (
-                ts, open_price, high, low, close
-            )
-        ):
-            continue
-
-        if min(open_price, high, low, close) <= 0:
-            continue
-
-        candles.append({
-            "time": ts,
-            "open": open_price,
-            "high": high,
-            "low": low,
-            "close": close,
-        })
-
-    candles.sort(key=lambda x: x["time"])
-
-    return candles if len(candles) >= 5 else None
-
-
-def create_candlestick_image(mint, timeframe, token_name):
-
-    candles = get_chart_candles(mint, timeframe)
-
-    if not candles:
-        return None
-
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=130)
-
-    width = 0.65
-
-    for index, candle in enumerate(candles):
-
-        open_price = candle["open"]
-        high = candle["high"]
-        low = candle["low"]
-        close = candle["close"]
-
-        rising = close >= open_price
-        color = "#16a34a" if rising else "#dc2626"
-
-        ax.plot(
-            [index, index],
-            [low, high],
-            color=color,
-            linewidth=1.1,
-        )
-
-        body_bottom = min(open_price, close)
-        body_height = abs(close - open_price)
-
-        if body_height == 0:
-            body_height = max(open_price * 0.0001, 1e-12)
-
-        ax.add_patch(
-            Rectangle(
-                (index - width / 2, body_bottom),
-                width,
-                body_height,
-                facecolor=color,
-                edgecolor=color,
-                linewidth=0.7,
-            )
-        )
-
-    ax.set_title(
-        f"{token_name} | {timeframe}",
-        fontsize=15,
-        fontweight="bold",
-    )
-
-    ax.set_ylabel("Price (USD)")
-    ax.set_xlim(-1, len(candles))
-
-    step = max(1, len(candles) // 8)
-    tick_positions = list(range(0, len(candles), step))
-
-    ax.set_xticks(tick_positions)
-
-    labels = []
-
-    for index in tick_positions:
-
-        dt = datetime.fromtimestamp(
-            candles[index]["time"],
-            timezone.utc,
-        )
-
-        if timeframe == "4H":
-            labels.append(dt.strftime("%m-%d %H:%M"))
-        else:
-            labels.append(dt.strftime("%Y-%m-%d"))
-
-    ax.set_xticklabels(labels, rotation=25, ha="right")
-
-    ax.grid(False)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    fig.tight_layout()
-
-    image_buffer = io.BytesIO()
-
-    fig.savefig(
-        image_buffer,
-        format="png",
-        bbox_inches="tight",
-    )
-
-    plt.close(fig)
-
-    image_buffer.seek(0)
-
-    return image_buffer
-
-
-# ==================================================
 # OBSERVED ATH
 # ==================================================
 
@@ -1103,10 +907,7 @@ def ath_filter(store, state):
     ordered = candidates[cursor:] + candidates[:cursor]
     batch = ordered[:MAX_ATH_CHECKS_PER_RUN]
 
-    state["ath_cursor"] = (
-        cursor + len(batch)
-    ) % len(candidates)
-
+    state["ath_cursor"] = (cursor + len(batch)) % len(candidates)
     save_state(state)
 
     matches = 0
@@ -1171,7 +972,6 @@ def ath_filter(store, state):
 
         deliver(state, "ath", mint, message)
         matches += 1
-
         time.sleep(1)
 
     return matches
@@ -1191,7 +991,6 @@ def find_ath_breakout(candles, created_ts):
 
     peak = 0.0
     peak_time = None
-
     armed = False
     reference_ath = None
     drawdown_time = None
@@ -1209,11 +1008,8 @@ def find_ath_breakout(candles, created_ts):
                 peak > 0
                 and peak_time is not None
                 and ts > peak_time
-                and low <= peak * (
-                    1 - BREAKOUT_DROP_PERCENT / 100
-                )
+                and low <= peak * (1 - BREAKOUT_DROP_PERCENT / 100)
             ):
-
                 armed = True
                 reference_ath = peak
                 drawdown_time = ts
@@ -1242,8 +1038,7 @@ def find_ath_breakout(candles, created_ts):
         "previous_ath": reference_ath,
         "drawdown_low": drawdown_low,
         "drop_percent": (
-            (reference_ath - drawdown_low)
-            / reference_ath
+            (reference_ath - drawdown_low) / reference_ath
         ) * 100,
         "breakout_high": latest["high"],
         "breakout_time": latest["time"],
@@ -1258,7 +1053,7 @@ def ath_breakout_filter(store, state):
     ]
 
     candidates.sort(
-        key=lambda x: x.get("liquidity") or 0,
+        key=lambda x: (x.get("liquidity") or 0),
         reverse=True,
     )
 
@@ -1269,10 +1064,7 @@ def ath_breakout_filter(store, state):
     ordered = candidates[cursor:] + candidates[:cursor]
     batch = ordered[:MAX_BREAKOUT_CHECKS_PER_RUN]
 
-    state["breakout_cursor"] = (
-        cursor + len(batch)
-    ) % len(candidates)
-
+    state["breakout_cursor"] = (cursor + len(batch)) % len(candidates)
     save_state(state)
 
     matches = 0
@@ -1334,7 +1126,6 @@ def ath_breakout_filter(store, state):
 
         deliver(state, "ath_breakout", mint, message)
         matches += 1
-
         time.sleep(1)
 
     return matches
@@ -1415,10 +1206,7 @@ def ath_reclaim_filter(state):
     ordered = mints[cursor:] + mints[:cursor]
     batch = ordered[:BUY_CHECKS_PER_RUN]
 
-    state["buy_cursor"] = (
-        cursor + len(batch)
-    ) % len(mints)
-
+    state["buy_cursor"] = (cursor + len(batch)) % len(mints)
     save_state(state)
 
     matches = 0
@@ -1447,16 +1235,12 @@ def ath_reclaim_filter(state):
             continue
 
         price = live["price"]
-
-        threshold = ath * (
-            BUY_ATH_THRESHOLD_PERCENT / 100
-        )
+        threshold = ath * (BUY_ATH_THRESHOLD_PERCENT / 100)
 
         if price < threshold:
             continue
 
         distance = ((price / ath) - 1) * 100
-
         name = live.get("name") or info.get("name") or "Unknown"
         symbol = live.get("symbol") or info.get("symbol") or "???"
         chart = live.get("url") or dex_url(mint)
@@ -1560,130 +1344,19 @@ def migrate_old_ath_alerts(store, state):
     if recovered:
         save_state(state)
 
-    logging.info(
-        "Legacy ATH records recovered: %d",
-        recovered,
-    )
+    logging.info("Legacy ATH records recovered: %d", recovered)
 
     return recovered
 
 
 # ==================================================
-# TELEGRAM FORWARDED POST PROCESSING
+# TELEGRAM INCOMING: FORWARDED POSTS
 # ==================================================
 
-def extract_token_addresses(text):
-
-    if not text:
-        return []
-
-    found = BASE58_PATTERN.findall(text)
-
-    return list(dict.fromkeys(found))
-
-
-def process_forwarded_post(message):
-
-    chat = message.get("chat") or {}
-    chat_id = str(chat.get("id", ""))
-
-    if chat.get("type") != "private":
-        return
-
-    if chat_id not in CHAT_IDS:
-        logging.warning(
-            "Unauthorized chart request from %s",
-            chat_id,
-        )
-        return
-
-    text_content = (
-        message.get("text")
-        or message.get("caption")
-        or ""
-    )
-
-    addresses = extract_token_addresses(text_content)
-
-    if not addresses:
-        send_telegram(
-            chat_id,
-            "❌ آدرس قرارداد سولانا در متن یا کپشن پست پیدا نشد.\n"
-            "لطفاً پستی را فوروارد کن که آدرس قرارداد داخل آن باشد."
-        )
-        return
-
-    token = None
-    mint = None
-
-    for address in addresses:
-
-        live = get_live_token_data(address)
-
-        if live:
-            token = live
-            mint = address
-            break
-
-    if not token or not mint:
-        send_telegram(
-            chat_id,
-            "❌ توکن معتبری از آدرس‌های پست پیدا نشد."
-        )
-        return
-
-    token_name = (
-        token.get("symbol")
-        or token.get("name")
-        or "TOKEN"
-    )
-
-    # Generate only two requested charts.
-    chart_4h = create_candlestick_image(
-        mint,
-        "4H",
-        token_name,
-    )
-
-    chart_1d = create_candlestick_image(
-        mint,
-        "1D",
-        token_name,
-    )
-
-    sent_any = False
-
-    if chart_4h:
-        if send_telegram_photo(chat_id, chart_4h):
-            sent_any = True
-
-    if chart_1d:
-        if send_telegram_photo(chat_id, chart_1d):
-            sent_any = True
-
-    if not sent_any:
-        send_telegram(
-            chat_id,
-            "❌ اطلاعات کندلی این توکن در GeckoTerminal در دسترس نیست."
-        )
-
-    logging.info(
-        "Chart request processed: %s",
-        mint,
-    )
-
-
-# ==================================================
-# TELEGRAM BOT API POLLING
-# NO API ID / NO API HASH
-# ==================================================
-
-def poll_telegram_messages(state):
+def get_telegram_updates(offset):
 
     if not BOT_TOKEN:
-        return
-
-    offset = int(state.get("telegram_update_offset", 0))
+        return []
 
     url = (
         "https://api.telegram.org/"
@@ -1691,11 +1364,11 @@ def poll_telegram_messages(state):
     )
 
     try:
-
         response = session.get(
             url,
             params={
                 "offset": offset,
+                "limit": TELEGRAM_UPDATES_LIMIT,
                 "timeout": 0,
                 "allowed_updates": json.dumps(["message"]),
             },
@@ -1706,46 +1379,359 @@ def poll_telegram_messages(state):
         payload = response.json()
 
         if not payload.get("ok"):
-            logging.warning("Telegram getUpdates returned an error")
-            return
+            logging.warning("Telegram getUpdates returned not-ok: %s", payload)
+            return []
 
-        for update in payload.get("result", []):
-
-            update_id = update.get("update_id")
-
-            if update_id is None:
-                continue
-
-            # Save update offset to avoid processing it again.
-            state["telegram_update_offset"] = update_id + 1
-            save_state(state)
-
-            message = update.get("message")
-
-            if not isinstance(message, dict):
-                continue
-
-            # Accept forwarded posts only.
-            is_forwarded = any(
-                message.get(key)
-                for key in (
-                    "forward_origin",
-                    "forward_from",
-                    "forward_from_chat",
-                    "forward_sender_name",
-                )
-            )
-
-            if not is_forwarded:
-                continue
-
-            process_forwarded_post(message)
+        return payload.get("result", [])
 
     except Exception as exc:
-        logging.warning(
-            "Telegram polling failed: %s",
-            exc,
+        logging.warning("Telegram getUpdates failed: %s", exc)
+        return []
+
+
+def is_forwarded_message(message):
+
+    # Telegram Bot API newer and older forward metadata fields.
+    return bool(
+        message.get("forward_origin")
+        or message.get("forward_from")
+        or message.get("forward_from_chat")
+        or message.get("forward_sender_name")
+    )
+
+
+def extract_mint_from_message(message):
+
+    text_content = (
+        message.get("text")
+        or message.get("caption")
+        or ""
+    )
+
+    matches = SOLANA_ADDRESS_PATTERN.findall(text_content)
+
+    for mint in matches:
+
+        if not mint_looks_valid(mint):
+            continue
+
+        # Confirm that this address is actually a Solana token on DexScreener.
+        token_data = get_live_token_data(mint)
+
+        if token_data:
+            return mint
+
+    return None
+
+
+def _normalize_ohlcv_rows(raw):
+    """Convert common provider OHLCV row formats into sorted candles."""
+    candles = []
+    if not isinstance(raw, list):
+        return None
+    for item in raw:
+        ts = op = hi = lo = cl = None
+        if isinstance(item, list) and len(item) >= 5:
+            ts, op, hi, lo, cl = item[:5]
+        elif isinstance(item, dict):
+            ts = first(item.get("timestamp"), item.get("time"), item.get("t"), item.get(" date"))
+            op = first(item.get("open"), item.get("o"))
+            hi = first(item.get("high"), item.get("h"))
+            lo = first(item.get("low"), item.get("l"))
+            cl = first(item.get("close"), item.get("c"))
+        ts = parse_timestamp(ts)
+        op, hi, lo, cl = map(as_float, (op, hi, lo, cl))
+        if ts is None or any(v is None or v <= 0 for v in (op, hi, lo, cl)):
+            continue
+        candles.append({"time": datetime.fromtimestamp(ts, timezone.utc),
+                        "open": op, "high": hi, "low": lo, "close": cl})
+    candles.sort(key=lambda x: x["time"])
+    return candles if len(candles) >= 2 else None
+
+
+def _chart_from_gecko(mint, timeframe, limit):
+    pool, side = gecko_best_pool(mint)
+    if not pool or not side:
+        return None
+    endpoint, aggregate = ("hour", 4) if timeframe == "4h" else ("day", 1)
+    payload = get_json(f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{endpoint}",
+                       {"aggregate": aggregate, "limit": limit,
+                        "currency": "usd", "token": side})
+    try:
+        raw = payload["data"]["attributes"]["ohlcv_list"]
+    except Exception:
+        return None
+    return _normalize_ohlcv_rows(raw)
+
+
+def _chart_from_coingecko(mint, timeframe, limit):
+    if not COINGECKO_DEMO_API_KEY:
+        return None
+    pool, _side = gecko_best_pool(mint)
+    if not pool:
+        return None
+    # CoinGecko Onchain OHLCV accepts a pool address and 1h/4h/1d timeframes.
+    interval = "hour" if timeframe == "4h" else "day"
+    aggregate = 4 if timeframe == "4h" else 1
+    url = f"{COINGECKO_ONCHAIN}/networks/solana/pools/{pool}/ohlcv/{interval}"
+    try:
+        response = session.get(url, params={"aggregate": aggregate, "limit": limit, "currency": "usd"},
+                               headers={"x-cg-demo-api-key": COINGECKO_DEMO_API_KEY},
+                               timeout=HTTP_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        raw = (payload.get("data") or {}).get("attributes", {}).get("ohlcv_list")
+        return _normalize_ohlcv_rows(raw)
+    except Exception as exc:
+        logging.warning("CoinGecko chart failed (%s): %s", timeframe, exc)
+        return None
+
+
+def _chart_from_moralis(mint, timeframe, limit):
+    if not MORALIS_API_KEY:
+        return None
+    headers = {"X-API-Key": MORALIS_API_KEY, "Accept": "application/json"}
+    try:
+        pairs_response = session.get(f"{MORALIS}/token/mainnet/{mint}/pairs",
+                                     headers=headers, timeout=HTTP_TIMEOUT)
+        pairs_response.raise_for_status()
+        pair_payload = pairs_response.json()
+        pairs = rows_from(pair_payload)
+        if not pairs and isinstance(pair_payload, list):
+            pairs = pair_payload
+        pair_address = None
+        for pair in pairs:
+            pair_address = first(pair.get("pairAddress"), pair.get("pair_address"), pair.get("address"))
+            if pair_address:
+                break
+        if not pair_address:
+            return None
+        tf = "4h" if timeframe == "4h" else "1d"
+        url = f"{MORALIS}/token/mainnet/pairs/{pair_address}/ohlcv"
+        response = session.get(url, params={"timeframe": tf, "currency": "usd", "limit": limit},
+                               headers=headers, timeout=HTTP_TIMEOUT)
+        response.raise_for_status()
+        payload = response.json()
+        raw = first(payload.get("result"), payload.get("data"), payload.get("ohlcv")) if isinstance(payload, dict) else payload
+        return _normalize_ohlcv_rows(raw)
+    except Exception as exc:
+        logging.warning("Moralis chart failed (%s): %s", timeframe, exc)
+        return None
+
+
+def get_chart_candles(mint, timeframe, limit):
+    # Provider order: GeckoTerminal first (no key), then optional CoinGecko,
+    # then optional Moralis. Each provider is independent and best-effort.
+    providers = (
+        ("GeckoTerminal", _chart_from_gecko),
+        ("CoinGecko", _chart_from_coingecko),
+        ("Moralis", _chart_from_moralis),
+    )
+    for name, provider in providers:
+        try:
+            candles = provider(mint, timeframe, limit)
+            if candles:
+                logging.info("Chart %s loaded from %s (%d candles)", timeframe, name, len(candles))
+                return candles
+        except Exception as exc:
+            logging.warning("Chart provider %s failed: %s", name, exc)
+    return None
+
+
+def create_candlestick_chart(mint, timeframe, symbol):
+
+    limit = (
+        CHART_4H_LIMIT
+        if timeframe == "4h"
+        else CHART_1D_LIMIT
+    )
+
+    candles = get_chart_candles(
+        mint,
+        timeframe,
+        limit,
+    )
+
+    if not candles:
+        return None
+
+    CHART_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(13, 7), dpi=150)
+
+    dates = [
+        mdates.date2num(candle["time"])
+        for candle in candles
+    ]
+
+    if timeframe == "4h":
+        candle_width = 0.11
+        timeframe_label = "4H"
+        date_format = "%m-%d %H:%M"
+    else:
+        candle_width = 0.65
+        timeframe_label = "1D"
+        date_format = "%Y-%m-%d"
+
+    for x, candle in zip(dates, candles):
+
+        open_price = candle["open"]
+        high = candle["high"]
+        low = candle["low"]
+        close = candle["close"]
+
+        candle_color = (
+            "#16a34a"
+            if close >= open_price
+            else "#dc2626"
         )
+
+        ax.plot(
+            [x, x],
+            [low, high],
+            color=candle_color,
+            linewidth=1.1,
+        )
+
+        body_bottom = min(open_price, close)
+        body_height = abs(close - open_price)
+
+        if body_height == 0:
+            body_height = max(open_price * 0.00001, 1e-12)
+
+        ax.add_patch(
+            Rectangle(
+                (x - candle_width / 2, body_bottom),
+                candle_width,
+                body_height,
+                facecolor=candle_color,
+                edgecolor=candle_color,
+                linewidth=0.7,
+            )
+        )
+
+    ax.set_title(
+        f"{symbol} / {timeframe_label}",
+        fontsize=16,
+        fontweight="bold",
+    )
+
+    ax.set_ylabel("Price (USD)")
+    ax.xaxis_date()
+    ax.xaxis.set_major_formatter(
+        mdates.DateFormatter(date_format, tz=timezone.utc)
+    )
+
+    ax.grid(True, alpha=0.18)
+    ax.tick_params(axis="x", rotation=25)
+    ax.margins(x=0.02, y=0.08)
+
+    fig.tight_layout()
+
+    safe_mint = re.sub(r"[^A-Za-z0-9_-]", "_", mint)
+    filename = CHART_OUTPUT_DIR / f"{safe_mint}_{timeframe}.png"
+
+    try:
+        fig.savefig(filename, bbox_inches="tight")
+    except Exception:
+        logging.exception("Chart image save failed")
+        plt.close(fig)
+        return None
+
+    plt.close(fig)
+    return filename
+
+
+def process_forwarded_messages(state):
+
+    offset = int(state.get("telegram_update_offset", 0))
+    updates = get_telegram_updates(offset)
+
+    processed = 0
+    allowed_chats = set(CHAT_IDS)
+
+    for update in updates:
+
+        update_id = update.get("update_id")
+
+        if update_id is None:
+            continue
+
+        # Advance the offset only after handling this update.
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+
+        if (
+            chat.get("type") != "private"
+            or chat_id not in allowed_chats
+        ):
+            state["telegram_update_offset"] = update_id + 1
+            save_state(state)
+            continue
+
+        if not is_forwarded_message(message):
+            state["telegram_update_offset"] = update_id + 1
+            save_state(state)
+            continue
+
+        mint = extract_mint_from_message(message)
+
+        if not mint:
+            send_telegram(
+                chat_id,
+                "❌ آدرس قرارداد معتبر سولانا در پست فورواردشده پیدا نشد.",
+            )
+            state["telegram_update_offset"] = update_id + 1
+            save_state(state)
+            processed += 1
+            continue
+
+        live = get_live_token_data(mint)
+
+        if not live:
+            send_telegram(
+                chat_id,
+                "❌ اطلاعات این توکن در DexScreener پیدا نشد.",
+            )
+            state["telegram_update_offset"] = update_id + 1
+            save_state(state)
+            processed += 1
+            continue
+
+        symbol = live.get("symbol") or "TOKEN"
+
+        chart_4h = create_candlestick_chart(
+            mint,
+            "4h",
+            symbol,
+        )
+
+        chart_1d = create_candlestick_chart(
+            mint,
+            "1d",
+            symbol,
+        )
+
+        if not chart_4h or not chart_1d:
+            send_telegram(
+                chat_id,
+                "❌ دریافت کندل‌های 4H یا 1D از GeckoTerminal ناموفق بود. "
+                "ممکن است برای این توکن تاریخچه کافی وجود نداشته باشد.",
+            )
+        else:
+            # Send only the two requested chart images.
+            send_telegram_photo(chat_id, chart_4h)
+            send_telegram_photo(chat_id, chart_1d)
+
+        state["telegram_update_offset"] = update_id + 1
+        save_state(state)
+        processed += 1
+
+        time.sleep(0.3)
+
+    logging.info("Forwarded Telegram posts processed: %d", processed)
+    return processed
 
 
 # ==================================================
@@ -1761,10 +1747,11 @@ def main():
 
     state = load_state()
 
-    logging.info("DEX HUNTER V15 scan started")
+    logging.info("DEX HUNTER V16 scan started")
 
-    # Receive forwarded Telegram posts.
-    poll_telegram_messages(state)
+    # First, process posts forwarded to the bot.
+    # This uses the same Bot Token and the persistent update offset.
+    process_forwarded_messages(state)
 
     candidates = {}
 
@@ -1773,6 +1760,7 @@ def main():
     source_geckoterminal(candidates)
     source_pump_fun(candidates)
     source_stonk_fun(candidates)
+    source_voidscreener(candidates)
 
     logging.info(
         "Discovered %d unique tokens",
@@ -1785,8 +1773,8 @@ def main():
     migrate_old_ath_alerts(candidates, state)
 
     with_market_cap = sum(
-        1 for c in candidates.values()
-        if c.get("market_cap") is not None
+        1 for candidate in candidates.values()
+        if candidate.get("market_cap") is not None
     )
 
     # FILTER 1: ATH DROP
@@ -1801,7 +1789,7 @@ def main():
     save_state(state)
 
     logging.info(
-        "V15 COMPLETE | "
+        "V16 COMPLETE | "
         "tokens=%d | "
         "market_cap_data=%d | "
         "ath_alerts=%d | "
