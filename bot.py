@@ -5,42 +5,39 @@
 """
 DEX HUNTER V17 - SMART RECOVERY
 
-Sources:
+Five discovery sources:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
-5. VoidScreener
+5. VoidScreener (optional)
 
-Preserved:
+Main engine:
 - ATH DROP
-- ATH BREAKOUT after 75% drawdown
-- ATH RECLAIM BUY
-- Telegram forwarded-post charts (4H + 1D)
-- Multi-source candle fallback
-- No volume filter
-- No automatic trading
+- SMART RECOVERY
+- BOTTOM FORMING
+- RECOVERY
+- CONFIRMED REVERSAL
+- ATH BREAKOUT
+- FORWARDED TELEGRAM CHARTS
 
-New:
-- Smart Recovery Engine
-- FALLING / BOTTOM FORMING / RECOVERY / CONFIRMED REVERSAL
-- Transparent technical score
-- WATCH / RECOVERY / STRONG BUY alerts
-- Persistent recovery.json
-- Persistent performance.json
-- 1h / 6h / 24h / 7d signal tracking
+No volume filter.
+No automatic trading.
+Scan interval: GitHub Actions every 5 minutes.
 
-Alerts only. No automatic trading.
+State files:
+- seen.json
+- recovery.json
+- performance.json
 """
 
-import json
-import logging
 import os
 import re
+import json
 import time
-
-from datetime import datetime, timezone
+import logging
 from pathlib import Path
+from datetime import datetime, timezone
 
 import requests
 import matplotlib
@@ -59,8 +56,8 @@ from matplotlib.patches import Rectangle
 VERSION = "V17 SMART RECOVERY"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-COINGECKO_DEMO_API_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
-MORALIS_API_KEY = os.getenv("MORALIS_API_KEY", "").strip()
+COINGECKO_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
+MORALIS_KEY = os.getenv("MORALIS_API_KEY", "").strip()
 
 CHAT_IDS = [
     "6665909136",
@@ -77,65 +74,45 @@ STONK = "https://www.stonkfun.xyz/api/public/v1"
 VOID = "https://api.voidscreener.com"
 
 COINGECKO_ONCHAIN = "https://api.coingecko.com/api/v3/onchain"
-MORALIS_SOLANA = "https://solana-gateway.moralis.io"
-
-STATE_FILE = Path("seen.json")
-RECOVERY_FILE = Path("recovery.json")
-PERFORMANCE_FILE = Path("performance.json")
-
-CHART_OUTPUT_DIR = Path("charts")
+MORALIS = "https://solana-gateway.moralis.io"
 
 HTTP_TIMEOUT = 20
-TELEGRAM_UPDATES_LIMIT = 30
-
 MAX_SOURCE_ROWS = 100
 
-# Original ATH filters
-ATH_MIN_MARKET_CAP_USD = 50_000
-ATH_MIN_DROP_PERCENT = 30.0
+MIN_MARKET_CAP = 50_000
+MIN_ATH_DROP = 30.0
 
+# Recovery scan
+RECOVERY_CHECKS_PER_RUN = 20
+RECOVERY_MIN_SCORE = 50
+
+# ATH scan
+ATH_CHECKS_PER_RUN = 5
+
+# Breakout scan
+BREAKOUT_CHECKS_PER_RUN = 5
 BREAKOUT_DROP_PERCENT = 75.0
-BREAKOUT_HISTORY_LIMIT = 1000
 BREAKOUT_MAX_AGE_DAYS = 990
 
-BUY_ATH_THRESHOLD_PERCENT = 99.5
-BUY_CHECKS_PER_RUN = 30
-BUY_ALERT_ENABLED = True
+# Candle limits
+CANDLE_4H_LIMIT = 100
+CANDLE_1D_LIMIT = 1000
 
-MAX_ATH_CHECKS_PER_RUN = 5
-MAX_BREAKOUT_CHECKS_PER_RUN = 5
+# Telegram
+TELEGRAM_UPDATES_LIMIT = 30
 
-# Smart Recovery
-RECOVERY_ENABLED = True
+# Duplicate protection
+WATCH_COOLDOWN = 12 * 3600
+RECOVERY_COOLDOWN = 12 * 3600
+STRONG_COOLDOWN = 24 * 3600
 
-RECOVERY_MIN_MARKET_CAP_USD = 50_000
-RECOVERY_MIN_LIQUIDITY_USD = 10_000
+# Files
+SEEN_FILE = Path("seen.json")
+RECOVERY_FILE = Path("recovery.json")
+PERFORMANCE_FILE = Path("performance.json")
+CHART_DIR = Path("charts")
 
-RECOVERY_CHECKS_PER_RUN = 12
-RECOVERY_CANDLE_LIMIT = 80
-
-WATCH_SCORE = 50
-RECOVERY_SCORE = 65
-STRONG_BUY_SCORE = 80
-
-# Minimum number of candles required for technical analysis
-RECOVERY_MIN_CANDLES = 18
-
-# Avoid repeated alerts for the same signal stage
-RECOVERY_ALERT_COOLDOWN_HOURS = 24
-
-# Performance evaluation
-PERFORMANCE_WINDOWS = {
-    "1h": 3600,
-    "6h": 21600,
-    "24h": 86400,
-    "7d": 604800,
-}
-
-CHART_4H_LIMIT = 100
-CHART_1D_LIMIT = 100
-
-SOLANA_ADDRESS_PATTERN = re.compile(
+ADDRESS_PATTERN = re.compile(
     r"(?<![1-9A-HJ-NP-Za-km-z])"
     r"[1-9A-HJ-NP-Za-km-z]{32,44}"
     r"(?![1-9A-HJ-NP-Za-km-z])"
@@ -146,21 +123,90 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+session = requests.Session()
+session.headers.update(HEADERS)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-session = requests.Session()
-session.headers.update(HEADERS)
-
 
 # =========================================================
-# HTTP AND GENERAL HELPERS
+# BASIC HELPERS
 # =========================================================
+
+def now():
+    return time.time()
+
+
+def number(value):
+    try:
+        if value is None or value == "":
+            return None
+
+        result = float(value)
+
+        if result != result:
+            return None
+
+        if result in (float("inf"), float("-inf")):
+            return None
+
+        return result
+
+    except Exception:
+        return None
+
+
+def first(*values):
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def timestamp(value):
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt.timestamp()
+
+        except Exception:
+            pass
+
+    result = number(value)
+
+    if result is None or result <= 0:
+        return None
+
+    if result > 10_000_000_000:
+        result /= 1000
+
+    return result
+
+
+def valid_mint(mint):
+    return (
+        isinstance(mint, str)
+        and 32 <= len(mint) <= 44
+    )
+
+
+def dex_url(mint):
+    return f"https://dexscreener.com/solana/{mint}"
+
 
 def get_json(url, params=None, headers=None):
-
     try:
         response = session.get(
             url,
@@ -177,134 +223,47 @@ def get_json(url, params=None, headers=None):
         return response.json()
 
     except Exception as exc:
-        logging.warning("Request failed %s: %s", url, exc)
+        logging.warning("API error %s: %s", url, exc)
         return None
-
-
-def as_float(value):
-
-    try:
-        if value is None or value == "":
-            return None
-
-        result = float(value)
-
-        if result != result:
-            return None
-
-        if result in (float("inf"), float("-inf")):
-            return None
-
-        return result
-
-    except (TypeError, ValueError):
-        return None
-
-
-def first(*values):
-
-    for value in values:
-        if value is not None and value != "":
-            return value
-
-    return None
-
-
-def parse_timestamp(value):
-
-    if value is None or value == "":
-        return None
-
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(
-                value.replace("Z", "+00:00")
-            )
-
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-
-            return parsed.timestamp()
-
-        except ValueError:
-            pass
-
-    result = as_float(value)
-
-    if result is None or result <= 0:
-        return None
-
-    if result > 10_000_000_000:
-        result /= 1000
-
-    return result
 
 
 def rows_from(payload):
-
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
 
     if not isinstance(payload, dict):
         return []
 
-    for key in ("tokens", "coins", "items", "results", "pools", "data"):
-
+    for key in (
+        "tokens", "coins", "items", "results",
+        "pools", "data", "pairs"
+    ):
         value = payload.get(key)
 
         if isinstance(value, list):
             return [x for x in value if isinstance(x, dict)]
 
         if isinstance(value, dict):
-            for nested in ("tokens", "coins", "items", "results", "pools"):
+            for nested in (
+                "tokens", "coins", "items",
+                "results", "pools", "pairs"
+            ):
                 inner = value.get(nested)
 
                 if isinstance(inner, list):
-                    return [x for x in inner if isinstance(x, dict)]
+                    return [
+                        x for x in inner
+                        if isinstance(x, dict)
+                    ]
 
     return []
 
 
-def mint_looks_valid(mint):
-
-    return (
-        isinstance(mint, str)
-        and 32 <= len(mint) <= 44
-    )
-
-
-def dex_url(mint):
-    return f"https://dexscreener.com/solana/{mint}"
-
-
-def safe_float(value, default=0.0):
-    result = as_float(value)
-    return result if result is not None else default
-
-
 # =========================================================
-# DATABASE HELPERS
+# DATABASES
 # =========================================================
 
-def empty_state():
-
-    return {
-        "sent": {
-            "ath": [],
-            "volume": [],
-            "ath_breakout": [],
-            "ath_reclaim": [],
-        },
-        "ath_watch": {},
-        "ath_cursor": 0,
-        "breakout_cursor": 0,
-        "buy_cursor": 0,
-        "telegram_update_offset": 0,
-    }
-
-
-def load_json_file(path, default):
-
+def read_json(path, default):
     if not path.exists():
         return default
 
@@ -314,15 +273,13 @@ def load_json_file(path, default):
         if isinstance(data, dict):
             return data
 
-        return default
-
     except Exception:
-        logging.exception("Could not load %s", path)
-        return default
+        logging.exception("Could not read %s", path)
+
+    return default
 
 
-def save_json_file(path, data):
-
+def write_json(path, data):
     temp = path.with_suffix(".tmp")
 
     temp.write_text(
@@ -333,32 +290,37 @@ def save_json_file(path, data):
     temp.replace(path)
 
 
-def load_state():
+def load_seen():
+    state = read_json(SEEN_FILE, {})
 
-    state = load_json_file(STATE_FILE, empty_state())
-    default = empty_state()
-
-    state.setdefault("sent", {})
-
-    for key in default["sent"]:
-        state["sent"].setdefault(key, [])
+    state.setdefault(
+        "sent",
+        {
+            "ath": [],
+            "breakout": [],
+            "watch": [],
+            "recovery": [],
+            "strong": [],
+            "ath_reclaim": [],
+        },
+    )
 
     state.setdefault("ath_watch", {})
+    state.setdefault("telegram_update_offset", 0)
     state.setdefault("ath_cursor", 0)
     state.setdefault("breakout_cursor", 0)
-    state.setdefault("buy_cursor", 0)
-    state.setdefault("telegram_update_offset", 0)
+
+    for key in (
+        "ath", "breakout", "watch",
+        "recovery", "strong", "ath_reclaim"
+    ):
+        state["sent"].setdefault(key, [])
 
     return state
 
 
-def save_state(state):
-    save_json_file(STATE_FILE, state)
-
-
 def load_recovery():
-
-    data = load_json_file(
+    data = read_json(
         RECOVERY_FILE,
         {"tokens": {}, "cursor": 0},
     )
@@ -369,13 +331,8 @@ def load_recovery():
     return data
 
 
-def save_recovery(data):
-    save_json_file(RECOVERY_FILE, data)
-
-
 def load_performance():
-
-    data = load_json_file(
+    data = read_json(
         PERFORMANCE_FILE,
         {"signals": []},
     )
@@ -385,45 +342,50 @@ def load_performance():
     return data
 
 
-def save_performance(data):
-    save_json_file(PERFORMANCE_FILE, data)
-
-
 # =========================================================
-# TELEGRAM OUTGOING
+# TELEGRAM
 # =========================================================
 
-def send_telegram(chat_id, message):
-
+def telegram_request(method, **kwargs):
     if not BOT_TOKEN:
-        return False
+        return None
 
     url = (
         "https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
+        f"bot{BOT_TOKEN}/{method}"
     )
 
     try:
         response = session.post(
             url,
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "disable_web_page_preview": True,
-            },
+            data=kwargs,
             timeout=HTTP_TIMEOUT,
         )
 
         response.raise_for_status()
-        return bool(response.json().get("ok"))
+        result = response.json()
+
+        if result.get("ok"):
+            return result.get("result")
 
     except Exception as exc:
-        logging.warning("Telegram failed %s: %s", chat_id, exc)
-        return False
+        logging.warning("Telegram %s failed: %s", method, exc)
+
+    return None
 
 
-def send_telegram_photo(chat_id, photo_path):
+def send_message(chat_id, message):
+    result = telegram_request(
+        "sendMessage",
+        chat_id=chat_id,
+        text=message,
+        disable_web_page_preview="true",
+    )
 
+    return result is not None
+
+
+def send_photo(chat_id, filename):
     if not BOT_TOKEN:
         return False
 
@@ -433,7 +395,7 @@ def send_telegram_photo(chat_id, photo_path):
     )
 
     try:
-        with open(photo_path, "rb") as photo:
+        with open(filename, "rb") as photo:
             response = session.post(
                 url,
                 data={"chat_id": chat_id},
@@ -445,30 +407,23 @@ def send_telegram_photo(chat_id, photo_path):
         return bool(response.json().get("ok"))
 
     except Exception as exc:
-        logging.warning("Telegram photo failed %s: %s", chat_id, exc)
+        logging.warning("Photo send failed: %s", exc)
         return False
 
 
-def deliver(state, scanner, mint, message):
-
-    state["sent"].setdefault(scanner, [])
-
-    sent = set(state["sent"][scanner])
+def deliver(state, category, mint, message):
+    sent = set(state["sent"][category])
 
     for chat_id in CHAT_IDS:
-
         key = f"{mint}|{chat_id}"
 
         if key in sent:
             continue
 
-        if send_telegram(chat_id, message):
+        if send_message(chat_id, message):
             sent.add(key)
-            state["sent"][scanner] = sorted(sent)
-            save_state(state)
-
-        else:
-            logging.warning("Telegram retry required: %s", key)
+            state["sent"][category] = sorted(sent)
+            write_json(SEEN_FILE, state)
 
         time.sleep(0.12)
 
@@ -478,18 +433,14 @@ def deliver(state, scanner, mint, message):
 # =========================================================
 
 def normalize(row, source):
-
-    attrs = (
-        row.get("attributes")
-        if isinstance(row.get("attributes"), dict)
-        else {}
-    )
-
+    attrs = row.get("attributes") or {}
     rels = row.get("relationships") or {}
-    base_rel = rels.get("base_token") or {}
-    base_data = base_rel.get("data") or {}
-    base_id = base_data.get("id")
+
     base = row.get("baseToken") or {}
+
+    base_id = (
+        (rels.get("base_token") or {}).get("data") or {}
+    ).get("id")
 
     mint = first(
         row.get("mint"),
@@ -507,7 +458,7 @@ def normalize(row, source):
         ),
     )
 
-    if not mint_looks_valid(mint):
+    if not valid_mint(mint):
         return None
 
     created = first(
@@ -521,7 +472,6 @@ def normalize(row, source):
         attrs.get("created_timestamp"),
         attrs.get("created_at"),
         attrs.get("pool_created_at"),
-        attrs.get("creation_timestamp"),
     )
 
     return {
@@ -540,33 +490,32 @@ def normalize(row, source):
             attrs.get("symbol"),
             "???",
         )),
-        "sources": {source},
-        "price": as_float(first(
+        "sources": [source],
+        "price": number(first(
             row.get("priceUsd"),
             row.get("price_usd"),
             attrs.get("base_token_price_usd"),
         )),
-        "market_cap": as_float(first(
+        "market_cap": number(first(
             row.get("marketCap"),
             row.get("market_cap"),
             row.get("usd_market_cap"),
             row.get("marketCapUsd"),
             attrs.get("market_cap_usd"),
         )),
-        "created_ts": parse_timestamp(created),
-        "pair_created_ts": parse_timestamp(first(
+        "created_ts": timestamp(created),
+        "pair_created_ts": timestamp(first(
             row.get("pairCreatedAt"),
             row.get("pair_created_at"),
             attrs.get("pair_created_at"),
             attrs.get("pool_created_at"),
         )),
-        "dex_url": first(row.get("url"), attrs.get("url")),
         "liquidity": 0.0,
+        "url": first(row.get("url"), attrs.get("url")),
     }
 
 
 def add_candidate(store, candidate):
-
     if not candidate:
         return
 
@@ -577,32 +526,30 @@ def add_candidate(store, candidate):
         return
 
     old = store[mint]
-    old["sources"].update(candidate["sources"])
 
-    for field in (
-        "name",
-        "symbol",
-        "price",
-        "market_cap",
-        "created_ts",
-        "pair_created_ts",
-        "dex_url",
+    old["sources"] = sorted(
+        set(old.get("sources", []))
+        | set(candidate.get("sources", []))
+    )
+
+    for key in (
+        "name", "symbol", "price",
+        "market_cap", "created_ts",
+        "pair_created_ts", "url",
     ):
-
         if (
-            old.get(field) is None
-            or old.get(field) in ("Unknown", "???")
-        ) and candidate.get(field) is not None:
-
-            old[field] = candidate[field]
+            old.get(key) is None
+            or old.get(key) in ("Unknown", "???")
+        ):
+            if candidate.get(key) is not None:
+                old[key] = candidate[key]
 
 
 # =========================================================
-# SOURCE 1: DEXSCREENER
+# DISCOVERY SOURCES
 # =========================================================
 
 def source_dexscreener(store):
-
     endpoints = [
         f"{DEX}/token-profiles/latest/v1",
         f"{DEX}/token-boosts/latest/v1",
@@ -610,59 +557,42 @@ def source_dexscreener(store):
     ]
 
     for url in endpoints:
-
         payload = get_json(url)
 
-        source_rows = (
-            payload if isinstance(payload, list)
-            else rows_from(payload)
-        )
-
-        for row in source_rows[:MAX_SOURCE_ROWS]:
-
+        for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
             if row.get("chainId") not in (None, "solana"):
                 continue
 
             mint = row.get("tokenAddress")
 
-            if not mint_looks_valid(mint):
+            if not valid_mint(mint):
                 continue
 
-            add_candidate(
-                store,
-                normalize(
-                    {
-                        "mint": mint,
-                        "name": row.get("description") or "Unknown",
-                        "symbol": "???",
-                        "url": row.get("url"),
-                    },
-                    "DexScreener",
-                ),
+            candidate = normalize(
+                {
+                    "mint": mint,
+                    "name": row.get("description") or "Unknown",
+                    "url": row.get("url"),
+                },
+                "DexScreener",
             )
 
+            add_candidate(store, candidate)
 
-# =========================================================
-# SOURCE 2: GECKOTERMINAL
-# =========================================================
 
-def source_geckoterminal(store):
-
+def source_gecko(store):
     for endpoint in ("new_pools", "trending_pools"):
-
         payload = get_json(
             f"{GECKO}/networks/solana/{endpoint}",
             {"page": 1},
         )
 
         for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
-
             rels = row.get("relationships") or {}
-            base_data = (
-                (rels.get("base_token") or {}).get("data") or {}
-            )
 
-            base_id = base_data.get("id")
+            base_id = (
+                (rels.get("base_token") or {}).get("data") or {}
+            ).get("id")
 
             mint = (
                 base_id.split("_", 1)[1]
@@ -670,32 +600,26 @@ def source_geckoterminal(store):
                 else None
             )
 
-            if not mint_looks_valid(mint):
+            if not valid_mint(mint):
                 continue
 
             attrs = row.get("attributes") or {}
 
-            add_candidate(
-                store,
-                normalize(
-                    {
-                        "mint": mint,
-                        "name": attrs.get("name"),
-                        "price_usd": attrs.get("base_token_price_usd"),
-                        "created_at": attrs.get("pool_created_at"),
-                        "url": attrs.get("url"),
-                    },
-                    "GeckoTerminal",
-                ),
+            candidate = normalize(
+                {
+                    "mint": mint,
+                    "name": attrs.get("name"),
+                    "price_usd": attrs.get("base_token_price_usd"),
+                    "created_at": attrs.get("pool_created_at"),
+                    "url": attrs.get("url"),
+                },
+                "GeckoTerminal",
             )
 
+            add_candidate(store, candidate)
 
-# =========================================================
-# SOURCE 3: PUMP.FUN
-# =========================================================
 
-def source_pump_fun(store):
-
+def source_pump(store):
     payload = get_json(
         f"{PUMP}/coins/latest",
         {
@@ -709,12 +633,7 @@ def source_pump_fun(store):
         add_candidate(store, normalize(row, "Pump.fun"))
 
 
-# =========================================================
-# SOURCE 4: STONK.FUN
-# =========================================================
-
-def source_stonk_fun(store):
-
+def source_stonk(store):
     payload = get_json(
         f"{STONK}/tokens",
         {
@@ -728,46 +647,30 @@ def source_stonk_fun(store):
         add_candidate(store, normalize(row, "Stonk.fun"))
 
 
-# =========================================================
-# SOURCE 5: VOIDScreener
-# =========================================================
-
-def source_voidscreener(store):
-
-    endpoints = (
+def source_void(store):
+    endpoints = [
         (f"{VOID}/api-trending", {"chain": "solana"}),
-        (f"{VOID}/api-tokens", {
-            "chain": "solana",
-            "limit": MAX_SOURCE_ROWS,
-        }),
-    )
+        (
+            f"{VOID}/api-tokens",
+            {"chain": "solana", "limit": MAX_SOURCE_ROWS},
+        ),
+    ]
 
     for url, params in endpoints:
-
         payload = get_json(url, params)
-        rows = rows_from(payload)
 
-        if isinstance(payload, list):
-            rows = [x for x in payload if isinstance(x, dict)]
-
-        for row in rows[:MAX_SOURCE_ROWS]:
-
-            candidate = normalize(row, "VoidScreener")
-
-            if candidate:
-                add_candidate(store, candidate)
+        for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
+            add_candidate(store, normalize(row, "VoidScreener"))
 
 
 # =========================================================
 # DEXSCREENER ENRICHMENT
 # =========================================================
 
-def enrich_from_dexscreener(store):
-
+def enrich(store):
     mints = list(store.keys())
 
     for start in range(0, len(mints), 30):
-
         batch = mints[start:start + 30]
 
         payload = get_json(
@@ -778,11 +681,10 @@ def enrich_from_dexscreener(store):
             continue
 
         for pair in payload:
+            if not isinstance(pair, dict):
+                continue
 
-            if (
-                not isinstance(pair, dict)
-                or pair.get("chainId") != "solana"
-            ):
+            if pair.get("chainId") != "solana":
                 continue
 
             base = pair.get("baseToken") or {}
@@ -791,88 +693,68 @@ def enrich_from_dexscreener(store):
             if mint not in store:
                 continue
 
-            candidate = store[mint]
+            item = store[mint]
 
-            candidate["name"] = base.get("name") or candidate["name"]
-            candidate["symbol"] = base.get("symbol") or candidate["symbol"]
-
-            liquidity = as_float(
+            liquidity = number(
                 (pair.get("liquidity") or {}).get("usd")
             ) or 0.0
 
-            pair_created = parse_timestamp(pair.get("pairCreatedAt"))
+            if liquidity >= item.get("liquidity", 0):
+                item["liquidity"] = liquidity
+                item["price"] = number(pair.get("priceUsd")) or item.get("price")
+                item["market_cap"] = (
+                    number(pair.get("marketCap"))
+                    or number(pair.get("fdv"))
+                    or item.get("market_cap")
+                )
+
+                item["name"] = base.get("name") or item["name"]
+                item["symbol"] = base.get("symbol") or item["symbol"]
+                item["url"] = pair.get("url") or item.get("url")
+
+            pair_created = timestamp(pair.get("pairCreatedAt"))
 
             if pair_created:
+                old = item.get("pair_created_ts")
 
-                old_created = candidate.get("pair_created_ts")
-
-                if old_created is None or pair_created < old_created:
-                    candidate["pair_created_ts"] = pair_created
-
-            if liquidity >= candidate.get("liquidity", 0):
-
-                candidate["liquidity"] = liquidity
-
-                candidate["price"] = (
-                    as_float(pair.get("priceUsd"))
-                    or candidate.get("price")
-                )
-
-                candidate["market_cap"] = (
-                    as_float(pair.get("marketCap"))
-                    or as_float(pair.get("fdv"))
-                    or candidate.get("market_cap")
-                )
-
-                candidate["dex_url"] = (
-                    pair.get("url")
-                    or candidate.get("dex_url")
-                )
+                if old is None or pair_created < old:
+                    item["pair_created_ts"] = pair_created
 
 
 # =========================================================
-# CANDLE NORMALIZATION
+# CANDLE DATA
 # =========================================================
 
-def _extract_ohlcv_rows(payload):
-
+def extract_ohlcv(payload):
     if not isinstance(payload, dict):
         return []
 
     try:
         rows = payload["data"]["attributes"]["ohlcv_list"]
-
         if isinstance(rows, list):
             return rows
-
     except Exception:
         pass
 
     for key in ("result", "data", "ohlcv", "candles", "items"):
-
         value = payload.get(key)
 
         if isinstance(value, list):
             return value
 
         if isinstance(value, dict):
-
             for inner in ("result", "data", "ohlcv", "candles", "items"):
-
                 if isinstance(value.get(inner), list):
                     return value[inner]
 
     return []
 
 
-def _normalize_candles(raw, include_ohlc=False):
-
+def normalize_candles(raw):
     output = []
 
     for item in raw:
-
         if isinstance(item, dict):
-
             ts = first(
                 item.get("timestamp"),
                 item.get("time"),
@@ -886,77 +768,52 @@ def _normalize_candles(raw, include_ohlc=False):
             cl = first(item.get("close"), item.get("c"))
 
         elif isinstance(item, (list, tuple)) and len(item) >= 5:
-
             ts, op, hi, lo, cl = item[:5]
 
         else:
             continue
 
-        ts = parse_timestamp(ts)
-
-        op, hi, lo, cl = map(
-            as_float,
-            (op, hi, lo, cl),
-        )
+        ts = timestamp(ts)
+        op, hi, lo, cl = map(number, (op, hi, lo, cl))
 
         if ts is None or any(
-            v is None or v <= 0
-            for v in (op, hi, lo, cl)
+            x is None or x <= 0 for x in (op, hi, lo, cl)
         ):
             continue
 
-        row = {
+        output.append({
             "time": ts,
+            "open": op,
             "high": hi,
             "low": lo,
-        }
-
-        if include_ohlc:
-
-            row.update({
-                "open": op,
-                "close": cl,
-                "datetime": datetime.fromtimestamp(
-                    ts,
-                    timezone.utc,
-                ),
-            })
-
-        output.append(row)
+            "close": cl,
+        })
 
     output.sort(key=lambda x: x["time"])
 
-    # Remove duplicate timestamps
+    # Remove duplicate timestamps.
     unique = {}
 
     for candle in output:
         unique[candle["time"]] = candle
 
-    return sorted(
-        unique.values(),
-        key=lambda x: x["time"],
-    )
+    return list(unique.values())
 
-
-# =========================================================
-# GECKO POOL SELECTION
-# =========================================================
 
 def gecko_best_pool(mint):
-
     payload = get_json(
         f"{GECKO}/networks/solana/tokens/{mint}/pools",
         {"page": 1},
     )
 
-    best_pool = None
-    best_liquidity = -1.0
+    best = None
+    best_liquidity = -1
     best_side = None
 
     for row in rows_from(payload):
-
         attrs = row.get("attributes") or {}
         rels = row.get("relationships") or {}
+
         pool_id = row.get("id")
 
         pool_address = (
@@ -987,42 +844,26 @@ def gecko_best_pool(mint):
 
         if mint == base_mint:
             side = "base"
-
         elif mint == quote_mint:
             side = "quote"
-
         else:
             continue
 
-        liquidity = as_float(
-            attrs.get("reserve_in_usd")
-        ) or 0.0
+        liquidity = number(attrs.get("reserve_in_usd")) or 0
 
         if pool_address and liquidity > best_liquidity:
-
-            best_pool = pool_address
+            best = pool_address
             best_side = side
             best_liquidity = liquidity
 
-    return best_pool, best_side
+    return best, best_side
 
 
-# =========================================================
-# CANDLE PROVIDERS
-# =========================================================
-
-def _coingecko_pool_ohlcv(
-    pool,
-    timeframe,
-    aggregate,
-    limit,
-    side="base",
-):
-
+def coingecko_ohlcv(pool, timeframe, aggregate, limit, side):
     headers = {"accept": "application/json"}
 
-    if COINGECKO_DEMO_API_KEY:
-        headers["x-cg-demo-api-key"] = COINGECKO_DEMO_API_KEY
+    if COINGECKO_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_KEY
 
     payload = get_json(
         f"{COINGECKO_ONCHAIN}/networks/solana/pools/{pool}/ohlcv/{timeframe}",
@@ -1035,41 +876,26 @@ def _coingecko_pool_ohlcv(
         headers=headers,
     )
 
-    return _extract_ohlcv_rows(payload)
+    return extract_ohlcv(payload)
 
 
-def _moralis_pair_addresses(mint):
-
-    if not MORALIS_API_KEY:
+def moralis_pairs(mint):
+    if not MORALIS_KEY:
         return []
 
-    headers = {
-        "accept": "application/json",
-        "X-API-Key": MORALIS_API_KEY,
-    }
-
     payload = get_json(
-        f"{MORALIS_SOLANA}/token/mainnet/{mint}/pairs",
-        headers=headers,
+        f"{MORALIS}/token/mainnet/{mint}/pairs",
+        headers={
+            "accept": "application/json",
+            "X-API-Key": MORALIS_KEY,
+        },
     )
 
     rows = rows_from(payload)
 
-    if not rows and isinstance(payload, dict):
-
-        for key in ("pairs", "result", "data"):
-
-            if isinstance(payload.get(key), list):
-                rows = payload[key]
-                break
-
     pairs = []
 
     for row in rows:
-
-        if not isinstance(row, dict):
-            continue
-
         address = first(
             row.get("pairAddress"),
             row.get("pair_address"),
@@ -1077,14 +903,11 @@ def _moralis_pair_addresses(mint):
         )
 
         if address:
-
-            liquidity = as_float(
-                first(
-                    row.get("liquidityUsd"),
-                    row.get("liquidity_usd"),
-                    row.get("liquidity"),
-                )
-            ) or 0
+            liquidity = number(first(
+                row.get("liquidityUsd"),
+                row.get("liquidity_usd"),
+                row.get("liquidity"),
+            )) or 0
 
             pairs.append((address, liquidity))
 
@@ -1093,22 +916,20 @@ def _moralis_pair_addresses(mint):
     return [x[0] for x in pairs[:3]]
 
 
-def _moralis_ohlcv(mint, timeframe, limit):
-
-    if not MORALIS_API_KEY:
+def moralis_ohlcv(mint, timeframe, limit):
+    if not MORALIS_KEY:
         return []
-
-    headers = {
-        "accept": "application/json",
-        "X-API-Key": MORALIS_API_KEY,
-    }
 
     tf = "4h" if timeframe == "hour" else "1d"
 
-    for pair in _moralis_pair_addresses(mint):
+    headers = {
+        "accept": "application/json",
+        "X-API-Key": MORALIS_KEY,
+    }
 
+    for pair in moralis_pairs(mint):
         payload = get_json(
-            f"{MORALIS_SOLANA}/token/mainnet/pairs/{pair}/ohlcv",
+            f"{MORALIS}/token/mainnet/pairs/{pair}/ohlcv",
             {
                 "timeframe": tf,
                 "currency": "usd",
@@ -1117,7 +938,7 @@ def _moralis_ohlcv(mint, timeframe, limit):
             headers=headers,
         )
 
-        rows = _extract_ohlcv_rows(payload)
+        rows = extract_ohlcv(payload)
 
         if rows:
             return rows
@@ -1125,29 +946,16 @@ def _moralis_ohlcv(mint, timeframe, limit):
     return []
 
 
-def get_candles(mint, timeframe, limit=100):
-
-    if timeframe == "4h":
-        endpoint = "hour"
-        aggregate = 4
-
-    elif timeframe == "1d":
-        endpoint = "day"
-        aggregate = 1
-
-    else:
-        return None, "Unsupported timeframe"
-
+def get_candles(mint, timeframe="hour", aggregate=4, limit=100):
     pool, side = gecko_best_pool(mint)
 
-    providers = []
+    attempts = []
 
     if pool and side:
-
-        providers.append((
+        attempts.append((
             "GeckoTerminal",
             lambda: get_json(
-                f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{endpoint}",
+                f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{timeframe}",
                 {
                     "aggregate": aggregate,
                     "limit": limit,
@@ -1157,136 +965,91 @@ def get_candles(mint, timeframe, limit=100):
             ),
         ))
 
-        providers.append((
-            "CoinGecko Onchain",
+        attempts.append((
+            "CoinGecko",
             lambda: {
-                "data": {
-                    "attributes": {
-                        "ohlcv_list": _coingecko_pool_ohlcv(
-                            pool,
-                            endpoint,
-                            aggregate,
-                            limit,
-                            side,
-                        )
-                    }
-                }
+                "result": coingecko_ohlcv(
+                    pool, timeframe, aggregate, limit, side
+                )
             },
         ))
 
-    providers.append((
+    attempts.append((
         "Moralis",
         lambda: {
-            "result": _moralis_ohlcv(
-                mint,
-                endpoint,
-                limit,
-            )
+            "result": moralis_ohlcv(mint, timeframe, limit)
         },
     ))
 
-    for provider, fetch in providers:
-
+    for provider, fetch in attempts:
         try:
-
-            payload = fetch()
-
-            candles = _normalize_candles(
-                _extract_ohlcv_rows(payload),
-                include_ohlc=True,
+            candles = normalize_candles(
+                extract_ohlcv(fetch())
             )
 
             if len(candles) >= 2:
-
                 logging.info(
-                    "%s candles for %s from %s: %d",
-                    timeframe,
-                    mint,
-                    provider,
-                    len(candles),
+                    "Candles %s %s via %s: %d",
+                    mint, timeframe, provider, len(candles)
                 )
 
-                return candles, provider
+                return candles
 
         except Exception:
+            logging.exception("Candle provider failed: %s", provider)
 
-            logging.exception(
-                "Candle provider failed: %s",
-                provider,
-            )
-
-    return None, "No candle provider returned usable data"
+    return []
 
 
-def get_daily_candles(mint, limit=1000):
-
-    candles, provider = get_candles(
+def get_4h(mint):
+    return get_candles(
         mint,
-        "1d",
-        limit,
+        timeframe="hour",
+        aggregate=4,
+        limit=CANDLE_4H_LIMIT,
     )
 
-    if not candles:
-        return None, None, provider
 
-    pool, side = gecko_best_pool(mint)
-
-    return (
-        [
-            {
-                "time": c["time"],
-                "high": c["high"],
-                "low": c["low"],
-            }
-            for c in candles
-        ],
-        pool,
-        provider,
+def get_1d(mint):
+    return get_candles(
+        mint,
+        timeframe="day",
+        aggregate=1,
+        limit=CANDLE_1D_LIMIT,
     )
 
 
 # =========================================================
-# OBSERVED ATH
+# ATH ENGINE
 # =========================================================
 
 def observed_ath(mint, created_ts):
-
     if not created_ts:
-        return None, "Token creation time unknown"
+        return None
 
-    age_days = (time.time() - created_ts) / 86400
+    age = (now() - created_ts) / 86400
 
-    if age_days > 175:
-        return None, "Full ATH history unavailable"
+    if age > 175:
+        return None
 
-    candles, pool, provider = get_daily_candles(
-        mint,
-        1000,
-    )
+    candles = get_1d(mint)
 
     if not candles:
-        return None, provider
+        return None
 
     if candles[0]["time"] > created_ts + 36 * 3600:
-        return None, "History does not start near token creation"
+        return None
 
-    ath = max(c["high"] for c in candles)
-
-    return ath, f"Observed daily ATH via {provider}"
+    return max(x["high"] for x in candles)
 
 
-# =========================================================
-# FILTER 1: ATH DROP
-# =========================================================
-
-def ath_filter(store, state):
-
+def ath_drop_filter(store, state):
     candidates = [
-        c for c in store.values()
+        item for item in store.values()
         if (
-            (c.get("market_cap") or 0) >= ATH_MIN_MARKET_CAP_USD
-            and (c.get("price") or 0) > 0
-            and c.get("created_ts")
+            (item.get("market_cap") or 0) >= MIN_MARKET_CAP
+            and (item.get("price") or 0) > 0
+            and item.get("created_ts")
         )
     ]
 
@@ -1300,257 +1063,93 @@ def ath_filter(store, state):
 
     cursor = int(state.get("ath_cursor", 0)) % len(candidates)
 
-    ordered = candidates[cursor:] + candidates[:cursor]
-    batch = ordered[:MAX_ATH_CHECKS_PER_RUN]
+    batch = (
+        candidates[cursor:] + candidates[:cursor]
+    )[:ATH_CHECKS_PER_RUN]
 
     state["ath_cursor"] = (
         cursor + len(batch)
     ) % len(candidates)
 
-    save_state(state)
-
     matches = 0
 
-    for candidate in batch:
+    for item in batch:
+        mint = item["mint"]
 
-        mint = candidate["mint"]
-
-        ath, note = observed_ath(
+        ath = observed_ath(
             mint,
-            candidate.get("created_ts"),
+            item.get("created_ts"),
         )
 
-        price = candidate.get("price") or 0
+        price = item.get("price") or 0
 
         if not ath or price <= 0 or price > ath:
             continue
 
-        drop = ((ath - price) / ath) * 100
+        drop = (ath - price) / ath * 100
 
-        if drop < ATH_MIN_DROP_PERCENT:
+        if drop < MIN_ATH_DROP:
             continue
 
-        watch = state["ath_watch"].get(mint, {})
+        previous = state["ath_watch"].get(mint, {})
+        old_ath = number(previous.get("ath")) or 0
 
-        previous_ath = as_float(watch.get("ath")) or 0
-        stored_ath = max(ath, previous_ath)
+        stored_ath = max(ath, old_ath)
 
         state["ath_watch"][mint] = {
             "ath": stored_ath,
-            "name": candidate["name"],
-            "symbol": candidate["symbol"],
-            "sources": sorted(candidate["sources"]),
-            "url": candidate.get("dex_url") or dex_url(mint),
-            "created_ts": candidate.get("created_ts"),
-            "registered_at": watch.get("registered_at") or time.time(),
+            "name": item["name"],
+            "symbol": item["symbol"],
+            "created_ts": item["created_ts"],
+            "registered_at": previous.get("registered_at") or now(),
+            "url": item.get("url") or dex_url(mint),
         }
 
-        save_state(state)
-
         message = (
-            f"🎯 شکار ریزش از سقف تاریخی | DEX HUNTER {VERSION}\n"
+            "🎯 ATH DROP DETECTED | DEX HUNTER V17\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
-            f"💰 قیمت فعلی: ${price:.10g}\n"
-            f"🏔 سقف مشاهده‌شده: ${stored_ath:.10g}\n"
-            f"📉 افت از ATH: {drop:.1f}%\n"
-            f"📊 مارکت‌کپ: ${(candidate.get('market_cap') or 0):,.0f}\n"
-            f"🔎 منابع: {', '.join(sorted(candidate['sources']))}\n"
-            f"🧾 قرارداد: {mint}\n"
-            f"📈 نمودار: {candidate.get('dex_url') or dex_url(mint)}\n"
-            f"ℹ️ {note}\n"
-            "👁 این توکن برای بررسی بازگشت ذخیره شد.\n"
-            "⚠️ هشدار تحلیلی است، نه توصیه خرید."
+            f"🪙 {item['name']} ({item['symbol']})\n"
+            f"💰 Price: ${price:.10g}\n"
+            f"🏔 ATH: ${stored_ath:.10g}\n"
+            f"📉 Drop: {drop:.2f}%\n"
+            f"📊 Market Cap: ${(item.get('market_cap') or 0):,.0f}\n"
+            f"💧 Liquidity: ${(item.get('liquidity') or 0):,.0f}\n"
+            f"🧾 Contract:\n{mint}\n"
+            f"🔗 {item.get('url') or dex_url(mint)}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "👁 Token registered for recovery monitoring.\n"
+            "⚠️ Analytical alert only."
         )
 
-        deliver(state, "ath", mint, message)
-
-        matches += 1
-        time.sleep(0.5)
-
-    return matches
-
-
-# =========================================================
-# FILTER 2: ATH BREAKOUT
-# =========================================================
-
-def find_ath_breakout(candles, created_ts):
-
-    if not candles:
-        return None
-
-    if created_ts and candles[0]["time"] > created_ts + 36 * 3600:
-        return None
-
-    peak = 0.0
-    peak_time = None
-    armed = False
-
-    reference_ath = None
-    drawdown_time = None
-    drawdown_low = None
-
-    for candle in candles:
-
-        ts = candle["time"]
-        high = candle["high"]
-        low = candle["low"]
-
-        if not armed:
-
-            if (
-                peak > 0
-                and peak_time is not None
-                and ts > peak_time
-                and low <= peak * (1 - BREAKOUT_DROP_PERCENT / 100)
-            ):
-
-                armed = True
-                reference_ath = peak
-                drawdown_time = ts
-                drawdown_low = low
-                continue
-
-            if high > peak:
-                peak = high
-                peak_time = ts
-
-        else:
-            drawdown_low = min(drawdown_low, low)
-
-    if not armed:
-        return None
-
-    latest = candles[-1]
-
-    if (
-        latest["time"] <= drawdown_time
-        or latest["high"] <= reference_ath
-    ):
-        return None
-
-    return {
-        "previous_ath": reference_ath,
-        "drawdown_low": drawdown_low,
-        "drop_percent": (
-            (reference_ath - drawdown_low) / reference_ath
-        ) * 100,
-        "breakout_high": latest["high"],
-        "breakout_time": latest["time"],
-    }
-
-
-def ath_breakout_filter(store, state):
-
-    candidates = [
-        c for c in store.values()
-        if c.get("created_ts") and (c.get("price") or 0) > 0
-    ]
-
-    candidates.sort(
-        key=lambda x: x.get("liquidity") or 0,
-        reverse=True,
-    )
-
-    if not candidates:
-        return 0
-
-    cursor = int(state.get("breakout_cursor", 0)) % len(candidates)
-
-    ordered = candidates[cursor:] + candidates[:cursor]
-    batch = ordered[:MAX_BREAKOUT_CHECKS_PER_RUN]
-
-    state["breakout_cursor"] = (
-        cursor + len(batch)
-    ) % len(candidates)
-
-    save_state(state)
-
-    matches = 0
-
-    for candidate in batch:
-
-        mint = candidate["mint"]
-
-        if all(
-            f"{mint}|{chat}" in state["sent"]["ath_breakout"]
+        if not all(
+            f"{mint}|{chat}" in state["sent"]["ath"]
             for chat in CHAT_IDS
         ):
-            continue
+            deliver(state, "ath", mint, message)
+            matches += 1
 
-        created_ts = candidate.get("created_ts")
-        age_days = (time.time() - created_ts) / 86400
+        time.sleep(0.4)
 
-        if age_days <= 0 or age_days > BREAKOUT_MAX_AGE_DAYS:
-            continue
-
-        candles, pool, note = get_daily_candles(
-            mint,
-            BREAKOUT_HISTORY_LIMIT,
-        )
-
-        if not candles:
-            continue
-
-        result = find_ath_breakout(
-            candles,
-            created_ts,
-        )
-
-        if not result:
-            continue
-
-        price = candidate.get("price") or 0
-
-        if price <= result["previous_ath"]:
-            continue
-
-        breakout_time = datetime.fromtimestamp(
-            result["breakout_time"],
-            timezone.utc,
-        ).strftime("%Y-%m-%d %H:%M UTC")
-
-        message = (
-            f"🚀 شکست سقف تاریخی پس از ریزش ۷۵٪ | DEX HUNTER {VERSION}\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 توکن: {candidate['name']} ({candidate['symbol']})\n"
-            f"🏔 ATH قبلی: ${result['previous_ath']:.10g}\n"
-            f"📉 کف ریزش: ${result['drawdown_low']:.10g}\n"
-            f"📊 میزان ریزش: {result['drop_percent']:.1f}%\n"
-            f"💥 سقف کندل شکست: ${result['breakout_high']:.10g}\n"
-            f"💰 قیمت فعلی: ${price:.10g}\n"
-            f"🕒 زمان شکست: {breakout_time}\n"
-            f"🧾 قرارداد: {mint}\n"
-            f"📈 نمودار: {candidate.get('dex_url') or dex_url(mint)}\n"
-            "⚠️ هشدار تحلیلی است، نه توصیه خرید."
-        )
-
-        deliver(state, "ath_breakout", mint, message)
-
-        matches += 1
-        time.sleep(0.5)
+    write_json(SEEN_FILE, state)
 
     return matches
 
 
 # =========================================================
-# DEXSCREENER LIVE PRICE
+# LIVE TOKEN DATA
 # =========================================================
 
-def get_live_token_data(mint):
-
+def live_token(mint):
     payload = get_json(
         f"{DEX}/tokens/v1/solana/{mint}"
     )
 
-    if not isinstance(payload, list) or not payload:
+    if not isinstance(payload, list):
         return None
 
-    valid_pairs = []
+    valid = []
 
     for pair in payload:
-
         if not isinstance(pair, dict):
             continue
 
@@ -1562,74 +1161,512 @@ def get_live_token_data(mint):
         if base.get("address") != mint:
             continue
 
-        price = as_float(pair.get("priceUsd"))
+        price = number(pair.get("priceUsd"))
 
-        if price is None or price <= 0:
+        if not price or price <= 0:
             continue
 
-        liquidity = as_float(
+        liquidity = number(
             (pair.get("liquidity") or {}).get("usd")
         ) or 0
 
-        valid_pairs.append({
+        valid.append({
             "price": price,
             "liquidity": liquidity,
-            "market_cap": (
-                as_float(pair.get("marketCap"))
-                or as_float(pair.get("fdv"))
-            ),
-            "name": base.get("name"),
-            "symbol": base.get("symbol"),
-            "url": pair.get("url"),
+            "name": base.get("name") or "Unknown",
+            "symbol": base.get("symbol") or "???",
+            "market_cap": number(pair.get("marketCap")),
+            "url": pair.get("url") or dex_url(mint),
         })
 
-    if not valid_pairs:
+    if not valid:
         return None
 
-    valid_pairs.sort(
+    valid.sort(
         key=lambda x: x["liquidity"],
         reverse=True,
     )
 
-    return valid_pairs[0]
+    return valid[0]
 
 
 # =========================================================
-# FILTER 3: ATH RECLAIM BUY
+# SMART RECOVERY ANALYSIS
 # =========================================================
 
-def ath_reclaim_filter(state):
+def analyze_recovery(item, candles):
+    """
+    Technical score: maximum 80 points.
 
-    if not BUY_ALERT_ENABLED:
-        return 0
+    ATH distance: 15
+    Bottom formation: 20
+    Structure change: 20
+    Resistance breakout: 15
+    Liquidity: 10
 
-    watch = state.get("ath_watch", {})
-    mints = list(watch.keys())
+    Contract safety and holder data are not available here.
+    They receive no fabricated points.
+    """
 
-    if not mints:
-        return 0
+    if len(candles) < 12:
+        return None
 
-    cursor = int(state.get("buy_cursor", 0)) % len(mints)
+    price = item.get("price") or candles[-1]["close"]
 
-    ordered = mints[cursor:] + mints[:cursor]
-    batch = ordered[:BUY_CHECKS_PER_RUN]
+    if price <= 0:
+        return None
 
-    state["buy_cursor"] = (
-        cursor + len(batch)
-    ) % len(mints)
+    watch = item.get("ath")
+    ath = number(watch)
 
-    save_state(state)
+    if not ath or ath <= 0:
+        ath = max(x["high"] for x in candles)
 
-    matches = 0
+    drop = max(0, (ath - price) / ath * 100)
 
-    for mint in batch:
+    score = 0
+    details = {}
 
-        info = watch.get(mint)
+    # -----------------------------------------------------
+    # 1. DISTANCE FROM ATH: 15 POINTS
+    # -----------------------------------------------------
 
-        if not isinstance(info, dict):
+    if 30 <= drop <= 90:
+        distance_score = 15
+    elif 20 <= drop < 30:
+        distance_score = 8
+    elif 90 < drop <= 95:
+        distance_score = 8
+    else:
+        distance_score = 0
+
+    score += distance_score
+    details["ath_distance"] = distance_score
+
+    # -----------------------------------------------------
+    # 2. BOTTOM FORMATION: 20 POINTS
+    # -----------------------------------------------------
+
+    recent = candles[-6:]
+    previous = candles[-12:-6]
+
+    recent_low = min(x["low"] for x in recent)
+    previous_low = min(x["low"] for x in previous)
+
+    no_new_low = recent_low >= previous_low * 0.985
+
+    rising_lows = (
+        candles[-1]["low"] > candles[-4]["low"]
+    )
+
+    close_above_recent_mid = (
+        candles[-1]["close"]
+        >= (max(x["high"] for x in recent)
+            + min(x["low"] for x in recent)) / 2
+    )
+
+    bottom_score = 0
+
+    if no_new_low:
+        bottom_score += 10
+
+    if rising_lows:
+        bottom_score += 5
+
+    if close_above_recent_mid:
+        bottom_score += 5
+
+    score += bottom_score
+    details["bottom"] = bottom_score
+
+    # -----------------------------------------------------
+    # 3. STRUCTURE CHANGE: 20 POINTS
+    # -----------------------------------------------------
+
+    last = candles[-1]
+    old = candles[-7:-1]
+
+    old_high = max(x["high"] for x in old)
+    old_low = min(x["low"] for x in old)
+
+    structure_score = 0
+
+    if last["close"] > old_high:
+        structure_score += 12
+
+    if last["low"] > old_low:
+        structure_score += 4
+
+    if last["close"] > last["open"]:
+        structure_score += 4
+
+    score += structure_score
+    details["structure"] = structure_score
+
+    # -----------------------------------------------------
+    # 4. RESISTANCE BREAKOUT: 15 POINTS
+    # -----------------------------------------------------
+
+    resistance = max(
+        x["high"] for x in candles[-13:-1]
+    )
+
+    breakout_score = 0
+
+    if last["close"] > resistance:
+        breakout_score = 15
+    elif last["high"] > resistance:
+        breakout_score = 7
+
+    score += breakout_score
+    details["breakout"] = breakout_score
+
+    # -----------------------------------------------------
+    # 5. LIQUIDITY: 10 POINTS
+    # -----------------------------------------------------
+
+    liquidity = number(item.get("liquidity")) or 0
+
+    if liquidity >= 100_000:
+        liquidity_score = 10
+    elif liquidity >= 50_000:
+        liquidity_score = 8
+    elif liquidity >= 20_000:
+        liquidity_score = 6
+    elif liquidity >= 5_000:
+        liquidity_score = 3
+    else:
+        liquidity_score = 0
+
+    score += liquidity_score
+    details["liquidity"] = liquidity_score
+
+    # -----------------------------------------------------
+    # CLASSIFICATION
+    # -----------------------------------------------------
+
+    if score >= 76 and breakout_score >= 15 and bottom_score >= 10:
+        stage = "STRONG BUY"
+        phase = "CONFIRMED REVERSAL"
+
+    elif score >= 65 and structure_score >= 12:
+        stage = "RECOVERY"
+        phase = "RECOVERY"
+
+    elif score >= 50 and bottom_score >= 10:
+        stage = "WATCH"
+        phase = "BOTTOM FORMING"
+
+    else:
+        stage = "NONE"
+        phase = "FALLING"
+
+    return {
+        "score": score,
+        "max_score": 80,
+        "stage": stage,
+        "phase": phase,
+        "drop": drop,
+        "price": price,
+        "ath": ath,
+        "resistance": resistance,
+        "details": details,
+        "liquidity": liquidity,
+        "coverage": "5/5 technical categories",
+    }
+
+
+# =========================================================
+# RECOVERY MESSAGE
+# =========================================================
+
+def recovery_message(item, result):
+    details = result["details"]
+
+    if result["stage"] == "STRONG BUY":
+        heading = "🟢🚨 STRONG BUY SIGNAL 🚨🟢"
+        urgency = "بازگشت قدرتمند با شکست مقاومت تأیید شده"
+    elif result["stage"] == "RECOVERY":
+        heading = "🟢 RECOVERY SIGNAL"
+        urgency = "نشانه‌های شروع بازگشت مشاهده شده"
+    else:
+        heading = "👁 WATCH ALERT"
+        urgency = "احتمال تشکیل کف؛ نیازمند تأیید بیشتر"
+
+    return (
+        f"{heading}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 {item.get('name', 'Unknown')} "
+        f"({item.get('symbol', '???')})\n"
+        f"📍 Phase: {result['phase']}\n"
+        f"📊 Score: {result['score']}/80\n"
+        f"💰 Price: ${result['price']:.10g}\n"
+        f"🏔 ATH: ${result['ath']:.10g}\n"
+        f"📉 Drop from ATH: {result['drop']:.2f}%\n"
+        f"💧 Liquidity: ${result['liquidity']:,.0f}\n"
+        f"🧱 Resistance: ${result['resistance']:.10g}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "📋 TECHNICAL SCORE\n"
+        f"ATH distance: {details['ath_distance']}/15\n"
+        f"Bottom formation: {details['bottom']}/20\n"
+        f"Structure: {details['structure']}/20\n"
+        f"Breakout: {details['breakout']}/15\n"
+        f"Liquidity: {details['liquidity']}/10\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📌 وضعیت: {urgency}\n"
+        f"🧾 Contract:\n{item['mint']}\n"
+        f"🔗 Chart: {item.get('url') or dex_url(item['mint'])}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ امتیاز فقط بر اساس داده‌های تکنیکال قابل دسترس است.\n"
+        "⚠️ امنیت قرارداد و هولدرها در این امتیاز بررسی نشده‌اند.\n"
+        "⚠️ این هشدار توصیه قطعی خرید نیست."
+    )
+
+
+# =========================================================
+# SIGNAL PERFORMANCE TRACKING
+# =========================================================
+
+def record_signal(performance, mint, item, result):
+    signals = performance["signals"]
+
+    # One performance record per token and signal stage.
+    for signal in signals:
+        if (
+            signal.get("mint") == mint
+            and signal.get("stage") == result["stage"]
+        ):
+            return
+
+    signals.append({
+        "mint": mint,
+        "name": item.get("name"),
+        "symbol": item.get("symbol"),
+        "stage": result["stage"],
+        "score": result["score"],
+        "entry_price": result["price"],
+        "entry_time": now(),
+        "max_price": result["price"],
+        "min_price": result["price"],
+        "snapshots": {},
+    })
+
+    # Keep the database bounded.
+    performance["signals"] = signals[-2000:]
+
+
+def update_performance(performance):
+    for signal in performance["signals"]:
+        mint = signal.get("mint")
+
+        if not mint:
             continue
 
-        ath = as_float(info.get("ath"))
+        live = live_token(mint)
+
+        if not live:
+            continue
+
+        price = live["price"]
+
+        signal["max_price"] = max(
+            number(signal.get("max_price")) or price,
+            price,
+        )
+
+        signal["min_price"] = min(
+            number(signal.get("min_price")) or price,
+            price,
+        )
+
+        elapsed = (now() - signal.get("entry_time", now())) / 3600
+
+        entry = number(signal.get("entry_price"))
+
+        if not entry or entry <= 0:
+            continue
+
+        for label, hours in (
+            ("1h", 1),
+            ("6h", 6),
+            ("24h", 24),
+            ("7d", 168),
+        ):
+            if elapsed >= hours and label not in signal["snapshots"]:
+                signal["snapshots"][label] = {
+                    "price": price,
+                    "change_percent": (price / entry - 1) * 100,
+                    "recorded_at": now(),
+                }
+
+
+# =========================================================
+# RECOVERY SCANNER
+# =========================================================
+
+def recovery_scanner(store, state, recovery, performance):
+    candidates = []
+
+    # Tokens previously found by ATH drop.
+    for mint, info in state["ath_watch"].items():
+        item = store.get(mint)
+
+        if not item:
+            item = {
+                "mint": mint,
+                "name": info.get("name", "Unknown"),
+                "symbol": info.get("symbol", "???"),
+                "price": None,
+                "market_cap": None,
+                "liquidity": 0,
+                "url": info.get("url") or dex_url(mint),
+                "ath": info.get("ath"),
+            }
+
+            live = live_token(mint)
+
+            if live:
+                item.update(live)
+
+        else:
+            item["ath"] = info.get("ath")
+
+        if item.get("price"):
+            candidates.append(item)
+
+    # Also consider newly discovered candidates that meet the
+    # minimum market-cap requirement.
+    existing = {x["mint"] for x in candidates}
+
+    for item in store.values():
+        if (
+            item["mint"] not in existing
+            and (item.get("market_cap") or 0) >= MIN_MARKET_CAP
+            and item.get("price")
+        ):
+            candidates.append(item)
+
+    if not candidates:
+        return 0
+
+    cursor = int(recovery.get("cursor", 0)) % len(candidates)
+
+    batch = (
+        candidates[cursor:] + candidates[:cursor]
+    )[:RECOVERY_CHECKS_PER_RUN]
+
+    recovery["cursor"] = (
+        cursor + len(batch)
+    ) % len(candidates)
+
+    alerts = 0
+
+    for item in batch:
+        mint = item["mint"]
+
+        candles = get_4h(mint)
+
+        if len(candles) < 12:
+            continue
+
+        result = analyze_recovery(item, candles)
+
+        if not result:
+            continue
+
+        entry = recovery["tokens"].setdefault(
+            mint,
+            {
+                "first_seen": now(),
+                "last_stage": "FALLING",
+                "last_alert": {},
+            },
+        )
+
+        entry["last_score"] = result["score"]
+        entry["last_phase"] = result["phase"]
+        entry["last_price"] = result["price"]
+        entry["last_checked"] = now()
+
+        stage = result["stage"]
+
+        if stage == "NONE":
+            entry["last_stage"] = "FALLING"
+            continue
+
+        if stage == "WATCH":
+            category = "watch"
+            cooldown = WATCH_COOLDOWN
+        elif stage == "RECOVERY":
+            category = "recovery"
+            cooldown = RECOVERY_COOLDOWN
+        else:
+            category = "strong"
+            cooldown = STRONG_COOLDOWN
+
+        previous = entry["last_alert"].get(category, 0)
+
+        if now() - previous < cooldown:
+            entry["last_stage"] = stage
+            continue
+
+        # Do not alert on a lower stage after a higher stage,
+        # unless the higher stage has not been reached before.
+        previous_stage = entry.get("highest_stage")
+
+        rank = {
+            "WATCH": 1,
+            "RECOVERY": 2,
+            "STRONG BUY": 3,
+        }
+
+        if (
+            previous_stage
+            and rank.get(stage, 0) < rank.get(previous_stage, 0)
+        ):
+            entry["last_stage"] = stage
+            continue
+
+        message = recovery_message(item, result)
+
+        deliver(state, category, mint, message)
+
+        entry["last_alert"][category] = now()
+        entry["highest_stage"] = stage
+        entry["last_stage"] = stage
+
+        record_signal(
+            performance,
+            mint,
+            item,
+            result,
+        )
+
+        alerts += 1
+
+        logging.info(
+            "RECOVERY ALERT %s | %s | score=%s",
+            mint, stage, result["score"]
+        )
+
+        write_json(RECOVERY_FILE, recovery)
+        write_json(PERFORMANCE_FILE, performance)
+        write_json(SEEN_FILE, state)
+
+        time.sleep(0.3)
+
+    return alerts
+
+
+# =========================================================
+# ATH RECLAIM ALERT
+# =========================================================
+
+def ath_reclaim_scanner(state):
+    alerts = 0
+
+    for mint, info in list(state["ath_watch"].items()):
+        ath = number(info.get("ath"))
 
         if not ath or ath <= 0:
             continue
@@ -1640,650 +1677,175 @@ def ath_reclaim_filter(state):
         ):
             continue
 
-        live = get_live_token_data(mint)
+        live = live_token(mint)
 
         if not live:
             continue
 
         price = live["price"]
-        threshold = ath * (BUY_ATH_THRESHOLD_PERCENT / 100)
 
-        if price < threshold:
+        if price < ath * 0.995:
             continue
 
-        distance = ((price / ath) - 1) * 100
-
-        name = live.get("name") or info.get("name") or "Unknown"
-        symbol = live.get("symbol") or info.get("symbol") or "???"
-        chart = live.get("url") or dex_url(mint)
+        distance = (price / ath - 1) * 100
 
         message = (
-            "🟢🚨🚨 ATH RECLAIM BUY SIGNAL 🚨🚨🟢\n"
+            "🟢🚨 ATH RECLAIM ALERT 🚨🟢\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "🟢 هشدار جدی بازگشت به سقف تاریخی\n"
+            f"🪙 {live['name']} ({live['symbol']})\n"
+            f"🏔 Stored ATH: ${ath:.10g}\n"
+            f"💰 Current price: ${price:.10g}\n"
+            f"📊 Distance from ATH: {distance:+.2f}%\n"
+            "🟢 Price returned to the ATH zone.\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 نام توکن: {name}\n"
-            f"🔖 نماد: {symbol}\n"
-            f"🏔 سقف تاریخی ذخیره‌شده: ${ath:.12g}\n"
-            f"💰 قیمت لحظه‌ای: ${price:.12g}\n"
-            f"📊 فاصله از ATH: {distance:+.2f}%\n"
-            f"📈 حد هشدار: {BUY_ATH_THRESHOLD_PERCENT}% ATH\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "🟢 وضعیت: ATH RECLAIM DETECTED\n"
-            "🟢 سیگنال: BUY ALERT\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🧾 آدرس قرارداد:\n{mint}\n"
-            f"🔗 نمودار و بررسی:\n{chart}\n"
-            "⚠️ این هشدار تضمین شکست پایدار یا سود نیست."
+            f"🧾 Contract:\n{mint}\n"
+            f"🔗 {live['url']}\n"
+            "⚠️ This does not guarantee a sustained breakout."
         )
 
         deliver(state, "ath_reclaim", mint, message)
 
-        matches += 1
-        time.sleep(0.3)
-
-    return matches
-
-
-# =========================================================
-# RECOVERY ENGINE: TECHNICAL ANALYSIS
-# =========================================================
-
-def calculate_recovery_score(candles, market_cap, liquidity):
-
-    """
-    Transparent 100-point technical score.
-
-    ATH distance:             15 points
-    Bottom formation:         20 points
-    Trend structure:          20 points
-    Resistance breakout:      20 points
-    Liquidity:                15 points
-    Market cap:               10 points
-
-    Contract security and holder data are NOT fabricated.
-    They are not included in this score.
-    """
-
-    if not candles or len(candles) < RECOVERY_MIN_CANDLES:
-        return None
-
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-
-    current = closes[-1]
-
-    if current <= 0:
-        return None
-
-    recent = candles[-12:]
-    previous = candles[-24:-12]
-
-    if len(previous) < 6:
-        return None
-
-    recent_low = min(c["low"] for c in recent)
-    previous_low = min(c["low"] for c in previous)
-
-    recent_high = max(c["high"] for c in recent)
-    previous_high = max(c["high"] for c in previous)
-
-    all_time_window_high = max(highs)
-    distance_from_window_high = (
-        (all_time_window_high - current)
-        / all_time_window_high
-    ) * 100 if all_time_window_high > 0 else 0
-
-    score = 0
-    details = {}
-
-    # 1. Distance from recent high: 15 points
-    if 20 <= distance_from_window_high <= 85:
-        points = 15
-    elif 10 <= distance_from_window_high < 20:
-        points = 8
-    elif distance_from_window_high > 85:
-        points = 5
-    else:
-        points = 0
-
-    score += points
-    details["ath_distance"] = points
-
-    # 2. Bottom formation: 20 points
-    # Recent lows should stop making lower lows.
-    if recent_low >= previous_low * 0.98:
-        bottom_points = 15
-
-        if current > recent_low * 1.05:
-            bottom_points += 5
-
-    elif recent_low > previous_low:
-        bottom_points = 20
-
-    else:
-        bottom_points = 0
-
-    score += bottom_points
-    details["bottom"] = bottom_points
-
-    # 3. Trend structure: 20 points
-    structure_points = 0
-
-    if current > closes[-4]:
-        structure_points += 5
-
-    if current > closes[-7]:
-        structure_points += 5
-
-    if recent_high > previous_high:
-        structure_points += 5
-
-    if recent_low >= previous_low * 0.98:
-        structure_points += 5
-
-    score += structure_points
-    details["structure"] = structure_points
-
-    # 4. Resistance breakout: 20 points
-    resistance = max(
-        c["high"] for c in candles[-7:-1]
-    )
-
-    breakout_points = 0
-
-    if current > resistance:
-        breakout_points = 20
-
-    elif current >= resistance * 0.98:
-        breakout_points = 10
-
-    score += breakout_points
-    details["breakout"] = breakout_points
-
-    # 5. Liquidity: 15 points
-    if liquidity >= 100_000:
-        liquidity_points = 15
-    elif liquidity >= 50_000:
-        liquidity_points = 12
-    elif liquidity >= 25_000:
-        liquidity_points = 9
-    elif liquidity >= RECOVERY_MIN_LIQUIDITY_USD:
-        liquidity_points = 6
-    else:
-        liquidity_points = 0
-
-    score += liquidity_points
-    details["liquidity"] = liquidity_points
-
-    # 6. Market cap: 10 points
-    if market_cap >= 250_000:
-        mc_points = 10
-    elif market_cap >= 100_000:
-        mc_points = 8
-    elif market_cap >= RECOVERY_MIN_MARKET_CAP_USD:
-        mc_points = 5
-    else:
-        mc_points = 0
-
-    score += mc_points
-    details["market_cap"] = mc_points
-
-    # Stage determination
-    if current < closes[-7] and recent_low < previous_low:
-        stage = "FALLING"
-
-    elif (
-        recent_low >= previous_low * 0.98
-        and current > recent_low * 1.03
-    ):
-        stage = "BOTTOM FORMING"
-
-    elif (
-        current > closes[-4]
-        and recent_high > previous_high
-    ):
-        stage = "RECOVERY"
-
-    else:
-        stage = "FALLING"
-
-    # Confirmed reversal requires two consecutive candle closes
-    # above the previous resistance.
-    confirmed = False
-
-    if len(candles) >= 8:
-
-        resistance_before = max(
-            c["high"] for c in candles[-8:-2]
-        )
-
-        last_two = candles[-2:]
-
-        if all(
-            c["close"] > resistance_before
-            for c in last_two
-        ):
-            confirmed = True
-
-    if confirmed:
-        stage = "CONFIRMED REVERSAL"
-
-    return {
-        "score": min(100, int(score)),
-        "stage": stage,
-        "details": details,
-        "price": current,
-        "recent_low": recent_low,
-        "resistance": resistance,
-        "distance_from_window_high": distance_from_window_high,
-        "confirmed": confirmed,
-    }
-
-
-# =========================================================
-# RECOVERY SIGNAL CLASSIFICATION
-# =========================================================
-
-def classify_recovery_signal(analysis, liquidity):
-
-    if not analysis:
-        return None
-
-    score = analysis["score"]
-
-    # A minimum liquidity condition is required for stronger alerts.
-    if score >= STRONG_BUY_SCORE:
-
-        if (
-            liquidity >= RECOVERY_MIN_LIQUIDITY_USD
-            and analysis["confirmed"]
-        ):
-            return "STRONG BUY"
-
-    if score >= RECOVERY_SCORE:
-        return "RECOVERY"
-
-    if score >= WATCH_SCORE:
-        return "WATCH"
-
-    return None
-
-
-def recovery_signal_message(candidate, analysis, signal):
-
-    mint = candidate["mint"]
-
-    details = analysis["details"]
-
-    risk_status = (
-        "نامشخص؛ بررسی امنیت قرارداد از منبع مستقل لازم است"
-    )
-
-    return (
-        f"🧠 DEX HUNTER V17 | {signal}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 توکن: {candidate.get('name', 'Unknown')} "
-        f"({candidate.get('symbol', '???')})\n"
-        f"💰 قیمت: ${analysis['price']:.12g}\n"
-        f"📊 امتیاز بازگشت: {analysis['score']}/100\n"
-        f"📍 مرحله: {analysis['stage']}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🔹 فاصله از سقف اخیر: "
-        f"{analysis['distance_from_window_high']:.1f}%\n"
-        f"🔹 کف اخیر: ${analysis['recent_low']:.12g}\n"
-        f"🔹 مقاومت: ${analysis['resistance']:.12g}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📋 جزئیات امتیاز:\n"
-        f"🏔 فاصله از سقف: {details['ath_distance']}/15\n"
-        f"🟡 تشکیل کف: {details['bottom']}/20\n"
-        f"📈 ساختار روند: {details['structure']}/20\n"
-        f"💥 شکست مقاومت: {details['breakout']}/20\n"
-        f"💧 نقدینگی: {details['liquidity']}/15\n"
-        f"📊 مارکت‌کپ: {details['market_cap']}/10\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"💧 نقدینگی: ${candidate.get('liquidity', 0):,.0f}\n"
-        f"📊 مارکت‌کپ: ${(candidate.get('market_cap') or 0):,.0f}\n"
-        f"🛡 امنیت قرارداد: {risk_status}\n"
-        f"🧾 قرارداد:\n{mint}\n"
-        f"🔗 بررسی نمودار:\n{candidate.get('dex_url') or dex_url(mint)}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ امتیاز، تحلیل تکنیکال است و تضمین سود نیست.\n"
-        "⚠️ قبل از خرید، امنیت قرارداد، نقدینگی و اسلیپیج را بررسی کنید."
-    )
-
-
-# =========================================================
-# RECOVERY DATABASE AND SIGNAL ENGINE
-# =========================================================
-
-def recovery_filter(store, recovery, performance):
-
-    if not RECOVERY_ENABLED:
-        return 0
-
-    candidates = [
-        c for c in store.values()
-        if (
-            (c.get("market_cap") or 0) >= RECOVERY_MIN_MARKET_CAP_USD
-            and (c.get("price") or 0) > 0
-            and (c.get("liquidity") or 0) > 0
-        )
-    ]
-
-    candidates.sort(
-        key=lambda x: x.get("liquidity") or 0,
-        reverse=True,
-    )
-
-    if not candidates:
-        return 0
-
-    cursor = int(recovery.get("cursor", 0)) % len(candidates)
-
-    ordered = candidates[cursor:] + candidates[:cursor]
-
-    batch = ordered[:RECOVERY_CHECKS_PER_RUN]
-
-    recovery["cursor"] = (
-        cursor + len(batch)
-    ) % len(candidates)
-
-    save_recovery(recovery)
-
-    alerts = 0
-
-    for candidate in batch:
-
-        mint = candidate["mint"]
-
-        candles, provider = get_candles(
-            mint,
-            "4h",
-            RECOVERY_CANDLE_LIMIT,
-        )
-
-        if not candles or len(candles) < RECOVERY_MIN_CANDLES:
-            continue
-
-        analysis = calculate_recovery_score(
-            candles,
-            candidate.get("market_cap") or 0,
-            candidate.get("liquidity") or 0,
-        )
-
-        if not analysis:
-            continue
-
-        signal = classify_recovery_signal(
-            analysis,
-            candidate.get("liquidity") or 0,
-        )
-
-        record = recovery["tokens"].setdefault(
-            mint,
-            {
-                "first_seen": time.time(),
-                "last_stage": None,
-                "last_score": 0,
-                "last_signal": None,
-                "last_signal_at": 0,
-                "history": [],
-            },
-        )
-
-        record["last_stage"] = analysis["stage"]
-        record["last_score"] = analysis["score"]
-        record["last_price"] = analysis["price"]
-        record["last_checked"] = time.time()
-        record["candle_provider"] = provider
-
-        record["history"].append({
-            "time": time.time(),
-            "price": analysis["price"],
-            "score": analysis["score"],
-            "stage": analysis["stage"],
-        })
-
-        # Keep the last 100 observations per token.
-        record["history"] = record["history"][-100:]
-
-        if not signal:
-            continue
-
-        now = time.time()
-
-        previous_signal = record.get("last_signal")
-        previous_time = safe_float(
-            record.get("last_signal_at"),
-            0,
-        )
-
-        # Send a new signal if its level improves.
-        # Same-level signals require cooldown.
-        improved = (
-            previous_signal is None
-            or (
-                previous_signal == "WATCH"
-                and signal in ("RECOVERY", "STRONG BUY")
-            )
-            or (
-                previous_signal == "RECOVERY"
-                and signal == "STRONG BUY"
-            )
-        )
-
-        cooldown_passed = (
-            now - previous_time
-            >= RECOVERY_ALERT_COOLDOWN_HOURS * 3600
-        )
-
-        if not improved and not cooldown_passed:
-            continue
-
-        message = recovery_signal_message(
-            candidate,
-            analysis,
-            signal,
-        )
-
-        for chat_id in CHAT_IDS:
-            send_telegram(chat_id, message)
-            time.sleep(0.12)
-
-        record["last_signal"] = signal
-        record["last_signal_at"] = now
-
-        # Register a performance record only for newly issued signals.
-        performance["signals"].append({
-            "mint": mint,
-            "name": candidate.get("name", "Unknown"),
-            "symbol": candidate.get("symbol", "???"),
-            "signal": signal,
-            "score": analysis["score"],
-            "entry_price": analysis["price"],
-            "entry_time": now,
-            "samples": {},
-        })
-
-        save_performance(performance)
-        save_recovery(recovery)
-
         alerts += 1
-
-        logging.info(
-            "RECOVERY ALERT %s %s score=%s price=%s",
-            signal,
-            mint,
-            analysis["score"],
-            analysis["price"],
-        )
-
-    save_recovery(recovery)
 
     return alerts
 
 
 # =========================================================
-# PERFORMANCE TRACKING
+# ATH BREAKOUT AFTER 75% DROP
 # =========================================================
 
-def update_performance(performance):
+def find_breakout(candles, created_ts):
+    if len(candles) < 10:
+        return None
 
-    now = time.time()
+    if created_ts and candles[0]["time"] > created_ts + 36 * 3600:
+        return None
 
-    signals = performance.get("signals", [])
+    peak = 0
+    peak_time = None
+    armed = False
+    reference_ath = None
+    drawdown_low = None
+    drawdown_time = None
 
-    # Process recent signals. Older completed records remain in database.
-    for record in signals[-500:]:
-
-        mint = record.get("mint")
-
-        if not mint:
-            continue
-
-        entry_price = as_float(record.get("entry_price"))
-
-        if not entry_price or entry_price <= 0:
-            continue
-
-        entry_time = safe_float(
-            record.get("entry_time"),
-            0,
-        )
-
-        if not entry_time:
-            continue
-
-        elapsed = now - entry_time
-
-        pending = [
-            name
-            for name, seconds in PERFORMANCE_WINDOWS.items()
+    for candle in candles:
+        if not armed:
             if (
-                elapsed >= seconds
-                and name not in record.get("samples", {})
-            )
-        ]
+                peak > 0
+                and peak_time is not None
+                and candle["time"] > peak_time
+                and candle["low"] <= peak * (
+                    1 - BREAKOUT_DROP_PERCENT / 100
+                )
+            ):
+                armed = True
+                reference_ath = peak
+                drawdown_low = candle["low"]
+                drawdown_time = candle["time"]
+                continue
 
-        if not pending:
-            continue
+            if candle["high"] > peak:
+                peak = candle["high"]
+                peak_time = candle["time"]
 
-        live = get_live_token_data(mint)
+        else:
+            drawdown_low = min(drawdown_low, candle["low"])
 
-        if not live:
-            continue
+    if not armed:
+        return None
 
-        current_price = live["price"]
+    latest = candles[-1]
 
-        if current_price <= 0:
-            continue
+    # Require candle CLOSE above the old ATH.
+    if (
+        latest["time"] <= drawdown_time
+        or latest["close"] <= reference_ath
+    ):
+        return None
 
-        samples = record.setdefault("samples", {})
-
-        for name in pending:
-
-            change = (
-                (current_price / entry_price) - 1
-            ) * 100
-
-            samples[name] = {
-                "time": now,
-                "price": current_price,
-                "change_percent": round(change, 4),
-            }
-
-            logging.info(
-                "PERFORMANCE %s %s %s: %.2f%%",
-                mint,
-                record.get("signal"),
-                name,
-                change,
-            )
-
-    save_performance(performance)
+    return {
+        "ath": reference_ath,
+        "low": drawdown_low,
+        "breakout": latest["close"],
+        "time": latest["time"],
+    }
 
 
-# =========================================================
-# MIGRATION: OLD ATH RECORDS
-# =========================================================
-
-def migrate_old_ath_alerts(store, state):
-
-    old_mints = set()
-
-    for item in state["sent"]["ath"]:
-
-        if "|" in item:
-            old_mints.add(item.split("|", 1)[0])
-
-    missing = [
-        mint for mint in old_mints
-        if mint not in state["ath_watch"]
+def breakout_scanner(store, state):
+    candidates = [
+        x for x in store.values()
+        if x.get("created_ts") and x.get("price")
     ]
 
-    recovered = 0
+    if not candidates:
+        return 0
 
-    for mint in missing[:MAX_ATH_CHECKS_PER_RUN]:
+    cursor = int(state.get("breakout_cursor", 0)) % len(candidates)
 
-        candidate = store.get(mint)
+    batch = (
+        candidates[cursor:] + candidates[:cursor]
+    )[:BREAKOUT_CHECKS_PER_RUN]
 
-        if not candidate:
+    state["breakout_cursor"] = (
+        cursor + len(batch)
+    ) % len(candidates)
+
+    alerts = 0
+
+    for item in batch:
+        mint = item["mint"]
+
+        if all(
+            f"{mint}|{chat}" in state["sent"]["breakout"]
+            for chat in CHAT_IDS
+        ):
             continue
 
-        created_ts = candidate.get("created_ts")
+        age = (now() - item["created_ts"]) / 86400
 
-        if not created_ts:
+        if age <= 0 or age > BREAKOUT_MAX_AGE_DAYS:
             continue
 
-        ath, note = observed_ath(
-            mint,
-            created_ts,
+        candles = get_1d(mint)
+
+        result = find_breakout(
+            candles,
+            item["created_ts"],
         )
 
-        if not ath:
+        if not result:
             continue
 
-        price = candidate.get("price") or 0
-
-        if price <= 0:
+        if item["price"] <= result["ath"]:
             continue
 
-        drop = ((ath - price) / ath) * 100
+        message = (
+            "🚀 ATH BREAKOUT AFTER 75% DROP\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 {item['name']} ({item['symbol']})\n"
+            f"🏔 Previous ATH: ${result['ath']:.10g}\n"
+            f"📉 Drawdown low: ${result['low']:.10g}\n"
+            f"💥 Breakout close: ${result['breakout']:.10g}\n"
+            f"💰 Current price: ${item['price']:.10g}\n"
+            f"🧾 Contract:\n{mint}\n"
+            f"🔗 {item.get('url') or dex_url(mint)}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Confirmation requires a daily candle close above ATH."
+        )
 
-        if drop < ATH_MIN_DROP_PERCENT:
-            continue
+        deliver(state, "breakout", mint, message)
 
-        state["ath_watch"][mint] = {
-            "ath": ath,
-            "name": candidate.get("name", "Unknown"),
-            "symbol": candidate.get("symbol", "???"),
-            "sources": sorted(candidate.get("sources", [])),
-            "url": candidate.get("dex_url") or dex_url(mint),
-            "created_ts": created_ts,
-            "registered_at": time.time(),
-        }
+        alerts += 1
+        time.sleep(0.3)
 
-        recovered += 1
-
-    if recovered:
-        save_state(state)
-
-    logging.info(
-        "Legacy ATH records recovered: %d",
-        recovered,
-    )
-
-    return recovered
+    return alerts
 
 
 # =========================================================
-# TELEGRAM INCOMING: FORWARDED POSTS
+# TELEGRAM FORWARDED POSTS
 # =========================================================
 
-def get_telegram_updates(offset):
-
+def get_updates(offset):
     if not BOT_TOKEN:
         return []
 
@@ -2293,7 +1855,6 @@ def get_telegram_updates(offset):
     )
 
     try:
-
         response = session.get(
             url,
             params={
@@ -2306,30 +1867,18 @@ def get_telegram_updates(offset):
         )
 
         response.raise_for_status()
-
         payload = response.json()
 
-        if not payload.get("ok"):
-            logging.warning(
-                "Telegram getUpdates returned not-ok: %s",
-                payload,
-            )
-            return []
-
-        return payload.get("result", [])
+        if payload.get("ok"):
+            return payload.get("result", [])
 
     except Exception as exc:
+        logging.warning("Telegram updates failed: %s", exc)
 
-        logging.warning(
-            "Telegram getUpdates failed: %s",
-            exc,
-        )
-
-        return []
+    return []
 
 
-def is_forwarded_message(message):
-
+def is_forwarded(message):
     return bool(
         message.get("forward_origin")
         or message.get("forward_from")
@@ -2338,79 +1887,42 @@ def is_forwarded_message(message):
     )
 
 
-def extract_mint_from_message(message):
-
-    text_content = (
+def extract_mint(message):
+    content = (
         message.get("text")
         or message.get("caption")
         or ""
     )
 
-    matches = SOLANA_ADDRESS_PATTERN.findall(
-        text_content
-    )
-
-    for mint in matches:
-
-        if not mint_looks_valid(mint):
+    for mint in ADDRESS_PATTERN.findall(content):
+        if not valid_mint(mint):
             continue
 
-        token_data = get_live_token_data(mint)
-
-        if token_data:
+        if live_token(mint):
             return mint
 
     return None
 
 
-# =========================================================
-# CHART GENERATION
-# =========================================================
+def chart_candles(mint, timeframe):
+    if timeframe == "4h":
+        candles = get_4h(mint)
+    else:
+        candles = get_1d(mint)
 
-def get_chart_candles(mint, timeframe, limit):
+    if len(candles) < 2:
+        return []
 
-    candles, provider = get_candles(
-        mint,
-        timeframe,
-        limit,
-    )
-
-    if not candles:
-        return None
-
-    return [
-        {
-            "time": candle["datetime"],
-            "open": candle["open"],
-            "high": candle["high"],
-            "low": candle["low"],
-            "close": candle["close"],
-        }
-        for candle in candles
-    ]
+    return candles
 
 
-def create_candlestick_chart(mint, timeframe, symbol):
-
-    limit = (
-        CHART_4H_LIMIT
-        if timeframe == "4h"
-        else CHART_1D_LIMIT
-    )
-
-    candles = get_chart_candles(
-        mint,
-        timeframe,
-        limit,
-    )
+def create_chart(mint, timeframe, symbol):
+    candles = chart_candles(mint, timeframe)
 
     if not candles:
         return None
 
-    CHART_OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    CHART_DIR.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(
         figsize=(13, 7),
@@ -2418,78 +1930,64 @@ def create_candlestick_chart(mint, timeframe, symbol):
     )
 
     dates = [
-        mdates.date2num(candle["time"])
-        for candle in candles
+        mdates.date2num(
+            datetime.fromtimestamp(
+                x["time"],
+                timezone.utc,
+            )
+        )
+        for x in candles
     ]
 
     if timeframe == "4h":
-
-        candle_width = 0.11
-        timeframe_label = "4H"
+        width = 0.11
+        label = "4H"
         date_format = "%m-%d %H:%M"
-
     else:
-
-        candle_width = 0.65
-        timeframe_label = "1D"
+        width = 0.65
+        label = "1D"
         date_format = "%Y-%m-%d"
 
     for x, candle in zip(dates, candles):
+        op = candle["open"]
+        hi = candle["high"]
+        lo = candle["low"]
+        cl = candle["close"]
 
-        open_price = candle["open"]
-        high = candle["high"]
-        low = candle["low"]
-        close = candle["close"]
-
-        candle_color = (
-            "#16a34a"
-            if close >= open_price
-            else "#dc2626"
-        )
+        color = "#16a34a" if cl >= op else "#dc2626"
 
         ax.plot(
             [x, x],
-            [low, high],
-            color=candle_color,
+            [lo, hi],
+            color=color,
             linewidth=1.1,
         )
 
-        body_bottom = min(
-            open_price,
-            close,
-        )
+        bottom = min(op, cl)
+        height = abs(cl - op)
 
-        body_height = abs(
-            close - open_price
-        )
-
-        if body_height == 0:
-            body_height = max(
-                open_price * 0.00001,
-                1e-12,
-            )
+        if height == 0:
+            height = max(op * 0.00001, 1e-12)
 
         ax.add_patch(
             Rectangle(
-                (
-                    x - candle_width / 2,
-                    body_bottom,
-                ),
-                candle_width,
-                body_height,
-                facecolor=candle_color,
-                edgecolor=candle_color,
+                (x - width / 2, bottom),
+                width,
+                height,
+                facecolor=color,
+                edgecolor=color,
                 linewidth=0.7,
             )
         )
 
     ax.set_title(
-        f"{symbol} / {timeframe_label}",
+        f"{symbol} / {label}",
         fontsize=16,
         fontweight="bold",
     )
 
     ax.set_ylabel("Price (USD)")
+
     ax.xaxis_date()
 
     ax.xaxis.set_major_formatter(
@@ -2505,30 +2003,14 @@ def create_candlestick_chart(mint, timeframe, symbol):
 
     fig.tight_layout()
 
-    safe_mint = re.sub(
-        r"[^A-Za-z0-9_-]",
-        "_",
-        mint,
-    )
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", mint)
 
-    filename = (
-        CHART_OUTPUT_DIR
-        / f"{safe_mint}_{timeframe}.png"
-    )
+    filename = CHART_DIR / f"{safe}_{timeframe}.png"
 
     try:
-
-        fig.savefig(
-            filename,
-            bbox_inches="tight",
-        )
-
+        fig.savefig(filename, bbox_inches="tight")
     except Exception:
-
-        logging.exception(
-            "Chart image save failed"
-        )
-
+        logging.exception("Chart creation failed")
         plt.close(fig)
         return None
 
@@ -2537,23 +2019,15 @@ def create_candlestick_chart(mint, timeframe, symbol):
     return filename
 
 
-# =========================================================
-# PROCESS FORWARDED TELEGRAM POSTS
-# =========================================================
+def process_forwarded(state):
+    offset = int(state.get("telegram_update_offset", 0))
 
-def process_forwarded_messages(state):
+    updates = get_updates(offset)
 
-    offset = int(
-        state.get("telegram_update_offset", 0)
-    )
-
-    updates = get_telegram_updates(offset)
-
+    allowed = set(CHAT_IDS)
     processed = 0
-    allowed_chats = set(CHAT_IDS)
 
     for update in updates:
-
         update_id = update.get("update_id")
 
         if update_id is None:
@@ -2562,101 +2036,69 @@ def process_forwarded_messages(state):
         message = update.get("message") or {}
         chat = message.get("chat") or {}
 
-        chat_id = str(
-            chat.get("id", "")
-        )
+        chat_id = str(chat.get("id", ""))
 
         if (
             chat.get("type") != "private"
-            or chat_id not in allowed_chats
+            or chat_id not in allowed
         ):
-
             state["telegram_update_offset"] = update_id + 1
-            save_state(state)
+            write_json(SEEN_FILE, state)
             continue
 
-        if not is_forwarded_message(message):
-
+        if not is_forwarded(message):
             state["telegram_update_offset"] = update_id + 1
-            save_state(state)
+            write_json(SEEN_FILE, state)
             continue
 
-        mint = extract_mint_from_message(message)
+        mint = extract_mint(message)
 
         if not mint:
-
-            send_telegram(
+            send_message(
                 chat_id,
-                "❌ آدرس قرارداد معتبر سولانا در پست فورواردشده پیدا نشد.",
-            )
-
-            state["telegram_update_offset"] = update_id + 1
-            save_state(state)
-
-            processed += 1
-            continue
-
-        live = get_live_token_data(mint)
-
-        if not live:
-
-            send_telegram(
-                chat_id,
-                "❌ اطلاعات این توکن در DexScreener پیدا نشد.",
-            )
-
-            state["telegram_update_offset"] = update_id + 1
-            save_state(state)
-
-            processed += 1
-            continue
-
-        symbol = live.get("symbol") or "TOKEN"
-
-        chart_4h = create_candlestick_chart(
-            mint,
-            "4h",
-            symbol,
-        )
-
-        chart_1d = create_candlestick_chart(
-            mint,
-            "1d",
-            symbol,
-        )
-
-        if not chart_4h or not chart_1d:
-
-            send_telegram(
-                chat_id,
-                "❌ دریافت کندل‌های 4H یا 1D از منابع موجود ناموفق بود.",
+                "❌ آدرس معتبر توکن سولانا پیدا نشد.",
             )
 
         else:
+            live = live_token(mint)
 
-            send_telegram_photo(
-                chat_id,
-                chart_4h,
-            )
+            if not live:
+                send_message(
+                    chat_id,
+                    "❌ اطلاعات توکن در DexScreener پیدا نشد.",
+                )
 
-            send_telegram_photo(
-                chat_id,
-                chart_1d,
-            )
+            else:
+                symbol = live.get("symbol") or "TOKEN"
+
+                chart4 = create_chart(
+                    mint, "4h", symbol
+                )
+
+                chart1 = create_chart(
+                    mint, "1d", symbol
+                )
+
+                if not chart4 or not chart1:
+                    send_message(
+                        chat_id,
+                        "❌ دریافت کندل‌های 4H یا 1D ناموفق بود.",
+                    )
+
+                else:
+                    send_photo(chat_id, chart4)
+                    send_photo(chat_id, chart1)
 
         state["telegram_update_offset"] = update_id + 1
-        save_state(state)
+        write_json(SEEN_FILE, state)
 
         processed += 1
-
         time.sleep(0.3)
 
     logging.info(
-        "Forwarded Telegram posts processed: %d",
+        "Forwarded messages processed: %d",
         processed,
     )
-
-    return processed
 
 
 # =========================================================
@@ -2664,105 +2106,75 @@ def process_forwarded_messages(state):
 # =========================================================
 
 def main():
-
     if not BOT_TOKEN:
-
         raise SystemExit(
-            "Missing GitHub Secret: TELEGRAM_BOT_TOKEN"
+            "Missing TELEGRAM_BOT_TOKEN GitHub Secret"
         )
 
-    state = load_state()
+    state = load_seen()
     recovery = load_recovery()
     performance = load_performance()
 
-    logging.info(
-        "%s scan started",
-        VERSION,
-    )
+    logging.info("%s scan started", VERSION)
 
-    # 1. Process forwarded Telegram posts
-    process_forwarded_messages(state)
+    # 1. Telegram forwarded charts
+    process_forwarded(state)
 
     # 2. Discover tokens
-    candidates = {}
+    store = {}
 
-    source_dexscreener(candidates)
-    source_geckoterminal(candidates)
-    source_pump_fun(candidates)
-    source_stonk_fun(candidates)
-    source_voidscreener(candidates)
+    source_dexscreener(store)
+    source_gecko(store)
+    source_pump(store)
+    source_stonk(store)
+    source_void(store)
 
     logging.info(
-        "Discovered %d unique tokens",
-        len(candidates),
+        "Discovered unique tokens: %d",
+        len(store),
     )
 
-    # 3. Enrich market data
-    enrich_from_dexscreener(candidates)
+    # 3. Enrich token information
+    enrich(store)
 
-    with_market_cap = sum(
-        1
-        for candidate in candidates.values()
-        if candidate.get("market_cap") is not None
-    )
+    # 4. ATH drop tracking
+    ath_count = ath_drop_filter(store, state)
 
-    # 4. Restore legacy ATH records
-    migrate_old_ath_alerts(
-        candidates,
+    # 5. Smart recovery engine
+    recovery_count = recovery_scanner(
+        store,
         state,
-    )
-
-    # 5. Original ATH Drop
-    ath_count = ath_filter(
-        candidates,
-        state,
-    )
-
-    # 6. Original ATH Breakout
-    breakout_count = ath_breakout_filter(
-        candidates,
-        state,
-    )
-
-    # 7. Original ATH Reclaim
-    buy_count = ath_reclaim_filter(
-        state,
-    )
-
-    # 8. New Smart Recovery Engine
-    recovery_count = recovery_filter(
-        candidates,
         recovery,
         performance,
     )
 
-    # 9. Update signal performance
+    # 6. ATH breakout
+    breakout_count = breakout_scanner(
+        store,
+        state,
+    )
+
+    # 7. ATH reclaim
+    reclaim_count = ath_reclaim_scanner(state)
+
+    # 8. Performance tracking
     update_performance(performance)
 
-    # 10. Save all databases
-    save_state(state)
-    save_recovery(recovery)
-    save_performance(performance)
+    # 9. Save all databases
+    write_json(SEEN_FILE, state)
+    write_json(RECOVERY_FILE, recovery)
+    write_json(PERFORMANCE_FILE, performance)
 
     logging.info(
-        "%s COMPLETE | "
-        "tokens=%d | "
-        "market_cap_data=%d | "
-        "ath_alerts=%d | "
-        "breakout_alerts=%d | "
-        "ath_reclaim_alerts=%d | "
-        "recovery_alerts=%d | "
-        "ath_watch=%d | "
-        "recovery_tracked=%d | "
-        "performance_records=%d",
+        "%s COMPLETE | tokens=%d | ATH=%d | "
+        "RECOVERY=%d | BREAKOUT=%d | RECLAIM=%d | "
+        "tracked=%d | performance=%d",
         VERSION,
-        len(candidates),
-        with_market_cap,
+        len(store),
         ath_count,
-        breakout_count,
-        buy_count,
         recovery_count,
-        len(state["ath_watch"]),
+        breakout_count,
+        reclaim_count,
         len(recovery["tokens"]),
         len(performance["signals"]),
     )
