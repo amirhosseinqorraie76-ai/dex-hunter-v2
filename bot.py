@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V16 + MULTI-SOURCE DISCOVERY + CHART FALLBACKS
+DEX HUNTER V16 + MULTI-SOURCE CANDLES + TELEGRAM FORWARDED-POST CHARTS
 
 SOURCES:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
-5. VoidScreener (best-effort; public API)
+5. VoidScreener (optional; skipped automatically if unavailable)
 
 FILTER 1: ATH DROP
 Market cap >= $50,000
@@ -28,6 +28,8 @@ Independent DexScreener monitoring.
 One BUY alert per token per Telegram chat.
 
 VOLUME FILTER: REMOVED COMPLETELY.
+
+CANDLE PROVIDERS (fallback order): GeckoTerminal, CoinGecko Onchain, Moralis.
 
 NEW:
 Forward a Telegram channel post to this bot in a private chat.
@@ -96,6 +98,10 @@ MAX_BREAKOUT_CHECKS_PER_RUN = 5
 
 HTTP_TIMEOUT = 20
 
+COINGECKO_ONCHAIN = "https://api.coingecko.com/api/v3/onchain"
+MORALIS_SOLANA = "https://solana-gateway.moralis.io"
+VOID = "https://api.voidscreener.com"
+
 # Telegram incoming-message settings
 TELEGRAM_UPDATES_LIMIT = 30
 
@@ -115,9 +121,6 @@ DEX = "https://api.dexscreener.com"
 GECKO = "https://api.geckoterminal.com/api/v2"
 PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
-VOID = "https://api.voidscreener.com"
-COINGECKO_ONCHAIN = "https://api.coingecko.com/api/v3/onchain"
-MORALIS = "https://solana-gateway.moralis.io"
 
 HEADERS = {
     "User-Agent": "DEX-HUNTER-V16/1.0",
@@ -137,12 +140,13 @@ session.headers.update(HEADERS)
 # HELPERS
 # ==================================================
 
-def get_json(url, params=None):
+def get_json(url, params=None, headers=None):
 
     try:
         response = session.get(
             url,
             params=params,
+            headers=headers,
             timeout=HTTP_TIMEOUT,
         )
 
@@ -647,21 +651,24 @@ def source_stonk_fun(store):
 
 
 # ==================================================
-# SOURCE 5: VOIDSCREENER (PUBLIC API, BEST-EFFORT)
+# SOURCE 5: VOIDScreener (OPTIONAL)
 # ==================================================
+
 def source_voidscreener(store):
-    # The public API has changed over time and may be temporarily unavailable.
-    # Each endpoint is isolated so a failure never stops the other sources.
-    for endpoint in ("/api-tokens", "/api-trending"):
-        payload = get_json(f"{VOID}{endpoint}")
+    """Best-effort discovery. VoidScreener outages never stop the scan."""
+    endpoints = (
+        (f"{VOID}/api-trending", {"chain": "solana"}),
+        (f"{VOID}/api-tokens", {"chain": "solana", "limit": MAX_SOURCE_ROWS}),
+    )
+    for url, params in endpoints:
+        payload = get_json(url, params)
         rows = rows_from(payload)
-        if not rows and isinstance(payload, list):
+        if isinstance(payload, list):
             rows = [x for x in payload if isinstance(x, dict)]
         for row in rows[:MAX_SOURCE_ROWS]:
-            chain = str(first(row.get("chain"), row.get("chainId"), row.get("network"), "solana")).lower()
-            if chain not in ("solana", "sol"):
-                continue
-            add_candidate(store, normalize(row, "VoidScreener"))
+            candidate = normalize(row, "VoidScreener")
+            if candidate:
+                add_candidate(store, candidate)
 
 
 
@@ -800,57 +807,124 @@ def gecko_best_pool(mint):
 # DAILY CANDLES (ORIGINAL FILTER LOGIC)
 # ==================================================
 
-def get_daily_candles(mint, limit=1000):
-
-    pool, side = gecko_best_pool(mint)
-
-    if not pool or not side:
-        return None, None, "استخر مناسب پیدا نشد"
-
-    payload = get_json(
-        f"{GECKO}/networks/solana/pools/{pool}/ohlcv/day",
-        {
-            "aggregate": 1,
-            "limit": limit,
-            "currency": "usd",
-            "token": side,
-        },
-    )
-
+def _extract_ohlcv_rows(payload):
+    """Normalize common GeckoTerminal/CoinGecko/Moralis OHLCV payloads."""
+    if not isinstance(payload, dict):
+        return []
     try:
-        candles = payload["data"]["attributes"]["ohlcv_list"]
+        rows = payload["data"]["attributes"]["ohlcv_list"]
+        if isinstance(rows, list):
+            return rows
     except Exception:
-        return None, None, "کندل روزانه در دسترس نیست"
+        pass
+    for key in ("result", "data", "ohlcv", "candles", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for inner in ("result", "data", "ohlcv", "candles", "items"):
+                if isinstance(value.get(inner), list):
+                    return value[inner]
+    return []
 
-    valid = []
 
-    for candle in candles:
-
-        if not isinstance(candle, list) or len(candle) < 5:
+def _normalize_candles(raw, include_ohlc=False):
+    output = []
+    for item in raw:
+        if isinstance(item, dict):
+            ts = first(item.get("timestamp"), item.get("time"), item.get("t"), item.get("from"))
+            op = first(item.get("open"), item.get("o"))
+            hi = first(item.get("high"), item.get("h"))
+            lo = first(item.get("low"), item.get("l"))
+            cl = first(item.get("close"), item.get("c"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 5:
+            ts, op, hi, lo, cl = item[:5]
+        else:
             continue
-
-        ts = as_float(candle[0])
-        high = as_float(candle[2])
-        low = as_float(candle[3])
-
-        if (
-            ts is None or high is None or low is None
-            or high <= 0 or low <= 0
-        ):
+        ts = parse_timestamp(ts)
+        op, hi, lo, cl = map(as_float, (op, hi, lo, cl))
+        if ts is None or any(v is None or v <= 0 for v in (op, hi, lo, cl)):
             continue
+        row = {"time": ts, "high": hi, "low": lo}
+        if include_ohlc:
+            row.update({
+                "open": op, "close": cl,
+                "datetime": datetime.fromtimestamp(ts, timezone.utc),
+            })
+        output.append(row)
+    output.sort(key=lambda x: x["time"])
+    return output
 
-        valid.append({
-            "time": ts,
-            "high": high,
-            "low": low,
-        })
 
-    if not valid:
-        return None, None, "کندل معتبر پیدا نشد"
+def _coingecko_pool_ohlcv(pool, timeframe, aggregate, limit, side="base"):
+    headers = {"accept": "application/json"}
+    if COINGECKO_DEMO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_DEMO_API_KEY
+    payload = get_json(
+        f"{COINGECKO_ONCHAIN}/networks/solana/pools/{pool}/ohlcv/{timeframe}",
+        {"aggregate": aggregate, "limit": limit, "currency": "usd", "token": side},
+        headers=headers,
+    )
+    return _extract_ohlcv_rows(payload)
 
-    valid.sort(key=lambda x: x["time"])
 
-    return valid, pool, "GeckoTerminal daily candles"
+def _moralis_pair_addresses(mint):
+    if not MORALIS_API_KEY:
+        return []
+    headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
+    payload = get_json(
+        f"{MORALIS_SOLANA}/token/mainnet/{mint}/pairs",
+        headers=headers,
+    )
+    rows = rows_from(payload)
+    if not rows and isinstance(payload, dict):
+        for key in ("pairs", "result", "data"):
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+    pairs = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        address = first(row.get("pairAddress"), row.get("pair_address"), row.get("address"))
+        if address:
+            pairs.append((address, as_float(first(row.get("liquidityUsd"), row.get("liquidity_usd"), row.get("liquidity"))) or 0))
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return [x[0] for x in pairs[:3]]
+
+
+def _moralis_ohlcv(mint, timeframe, limit):
+    if not MORALIS_API_KEY:
+        return []
+    headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
+    tf = "4h" if timeframe == "hour" else "1d"
+    for pair in _moralis_pair_addresses(mint):
+        payload = get_json(
+            f"{MORALIS_SOLANA}/token/mainnet/pairs/{pair}/ohlcv",
+            {"timeframe": tf, "currency": "usd", "limit": limit},
+            headers=headers,
+        )
+        rows = _extract_ohlcv_rows(payload)
+        if rows:
+            return rows
+    return []
+
+
+def get_daily_candles(mint, limit=1000):
+    pool, side = gecko_best_pool(mint)
+    providers = []
+    if pool and side:
+        providers.append(("GeckoTerminal", lambda: get_json(
+            f"{GECKO}/networks/solana/pools/{pool}/ohlcv/day",
+            {"aggregate": 1, "limit": limit, "currency": "usd", "token": side},
+        )))
+        providers.append(("CoinGecko Onchain", lambda: {"data": {"attributes": {"ohlcv_list": _coingecko_pool_ohlcv(pool, "day", 1, limit, side)}}}))
+    providers.append(("Moralis", lambda: {"result": _moralis_ohlcv(mint, "day", limit)}))
+    for provider, fetch in providers:
+        candles = _normalize_candles(_extract_ohlcv_rows(fetch()))
+        if candles:
+            return candles, pool, f"{provider} daily candles"
+    return None, pool, "کندل روزانه از هیچ‌یک از منابع در دسترس نبود"
 
 
 # ==================================================
@@ -1424,117 +1498,42 @@ def extract_mint_from_message(message):
     return None
 
 
-def _normalize_ohlcv_rows(raw):
-    """Convert common provider OHLCV row formats into sorted candles."""
-    candles = []
-    if not isinstance(raw, list):
-        return None
-    for item in raw:
-        ts = op = hi = lo = cl = None
-        if isinstance(item, list) and len(item) >= 5:
-            ts, op, hi, lo, cl = item[:5]
-        elif isinstance(item, dict):
-            ts = first(item.get("timestamp"), item.get("time"), item.get("t"), item.get(" date"))
-            op = first(item.get("open"), item.get("o"))
-            hi = first(item.get("high"), item.get("h"))
-            lo = first(item.get("low"), item.get("l"))
-            cl = first(item.get("close"), item.get("c"))
-        ts = parse_timestamp(ts)
-        op, hi, lo, cl = map(as_float, (op, hi, lo, cl))
-        if ts is None or any(v is None or v <= 0 for v in (op, hi, lo, cl)):
-            continue
-        candles.append({"time": datetime.fromtimestamp(ts, timezone.utc),
-                        "open": op, "high": hi, "low": lo, "close": cl})
-    candles.sort(key=lambda x: x["time"])
-    return candles if len(candles) >= 2 else None
-
-
-def _chart_from_gecko(mint, timeframe, limit):
-    pool, side = gecko_best_pool(mint)
-    if not pool or not side:
-        return None
-    endpoint, aggregate = ("hour", 4) if timeframe == "4h" else ("day", 1)
-    payload = get_json(f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{endpoint}",
-                       {"aggregate": aggregate, "limit": limit,
-                        "currency": "usd", "token": side})
-    try:
-        raw = payload["data"]["attributes"]["ohlcv_list"]
-    except Exception:
-        return None
-    return _normalize_ohlcv_rows(raw)
-
-
-def _chart_from_coingecko(mint, timeframe, limit):
-    if not COINGECKO_DEMO_API_KEY:
-        return None
-    pool, _side = gecko_best_pool(mint)
-    if not pool:
-        return None
-    # CoinGecko Onchain OHLCV accepts a pool address and 1h/4h/1d timeframes.
-    interval = "hour" if timeframe == "4h" else "day"
-    aggregate = 4 if timeframe == "4h" else 1
-    url = f"{COINGECKO_ONCHAIN}/networks/solana/pools/{pool}/ohlcv/{interval}"
-    try:
-        response = session.get(url, params={"aggregate": aggregate, "limit": limit, "currency": "usd"},
-                               headers={"x-cg-demo-api-key": COINGECKO_DEMO_API_KEY},
-                               timeout=HTTP_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        raw = (payload.get("data") or {}).get("attributes", {}).get("ohlcv_list")
-        return _normalize_ohlcv_rows(raw)
-    except Exception as exc:
-        logging.warning("CoinGecko chart failed (%s): %s", timeframe, exc)
-        return None
-
-
-def _chart_from_moralis(mint, timeframe, limit):
-    if not MORALIS_API_KEY:
-        return None
-    headers = {"X-API-Key": MORALIS_API_KEY, "Accept": "application/json"}
-    try:
-        pairs_response = session.get(f"{MORALIS}/token/mainnet/{mint}/pairs",
-                                     headers=headers, timeout=HTTP_TIMEOUT)
-        pairs_response.raise_for_status()
-        pair_payload = pairs_response.json()
-        pairs = rows_from(pair_payload)
-        if not pairs and isinstance(pair_payload, list):
-            pairs = pair_payload
-        pair_address = None
-        for pair in pairs:
-            pair_address = first(pair.get("pairAddress"), pair.get("pair_address"), pair.get("address"))
-            if pair_address:
-                break
-        if not pair_address:
-            return None
-        tf = "4h" if timeframe == "4h" else "1d"
-        url = f"{MORALIS}/token/mainnet/pairs/{pair_address}/ohlcv"
-        response = session.get(url, params={"timeframe": tf, "currency": "usd", "limit": limit},
-                               headers=headers, timeout=HTTP_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        raw = first(payload.get("result"), payload.get("data"), payload.get("ohlcv")) if isinstance(payload, dict) else payload
-        return _normalize_ohlcv_rows(raw)
-    except Exception as exc:
-        logging.warning("Moralis chart failed (%s): %s", timeframe, exc)
-        return None
-
-
 def get_chart_candles(mint, timeframe, limit):
-    # Provider order: GeckoTerminal first (no key), then optional CoinGecko,
-    # then optional Moralis. Each provider is independent and best-effort.
-    providers = (
-        ("GeckoTerminal", _chart_from_gecko),
-        ("CoinGecko", _chart_from_coingecko),
-        ("Moralis", _chart_from_moralis),
-    )
-    for name, provider in providers:
+    if timeframe == "4h":
+        endpoint, aggregate = "hour", 4
+    elif timeframe == "1d":
+        endpoint, aggregate = "day", 1
+    else:
+        return None
+
+    pool, side = gecko_best_pool(mint)
+    attempts = []
+    if pool and side:
+        attempts.append(("GeckoTerminal", lambda: get_json(
+            f"{GECKO}/networks/solana/pools/{pool}/ohlcv/{endpoint}",
+            {"aggregate": aggregate, "limit": limit, "currency": "usd", "token": side},
+        )))
+        # CoinGecko Demo pool endpoint uses the same pool address and OHLCV schema.
+        attempts.append(("CoinGecko Onchain", lambda: {"data": {"attributes": {"ohlcv_list": _coingecko_pool_ohlcv(pool, endpoint, aggregate, limit, side)}}}))
+    attempts.append(("Moralis", lambda: {"result": _moralis_ohlcv(mint, endpoint, limit)}))
+
+    for provider, fetch in attempts:
         try:
-            candles = provider(mint, timeframe, limit)
-            if candles:
-                logging.info("Chart %s loaded from %s (%d candles)", timeframe, name, len(candles))
-                return candles
-        except Exception as exc:
-            logging.warning("Chart provider %s failed: %s", name, exc)
+            raw = _extract_ohlcv_rows(fetch())
+            parsed = _normalize_candles(raw, include_ohlc=True)
+            if len(parsed) >= 2:
+                logging.info("Chart candles for %s %s: %s (%d)", mint, timeframe, provider, len(parsed))
+                return [{
+                    "time": candle["datetime"],
+                    "open": candle["open"],
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "close": candle["close"],
+                } for candle in parsed]
+        except Exception:
+            logging.exception("Candle provider failed: %s", provider)
+
+    logging.warning("All candle providers failed for %s (%s)", mint, timeframe)
     return None
 
 
@@ -1716,8 +1715,8 @@ def process_forwarded_messages(state):
         if not chart_4h or not chart_1d:
             send_telegram(
                 chat_id,
-                "❌ دریافت کندل‌های 4H یا 1D از GeckoTerminal ناموفق بود. "
-                "ممکن است برای این توکن تاریخچه کافی وجود نداشته باشد.",
+                "❌ دریافت کندل‌های 4H یا 1D از منابع موجود ناموفق بود. "
+                "ممکن است تاریخچه کافی نباشد یا APIهای جایگزین تنظیم/در دسترس نباشند.",
             )
         else:
             # Send only the two requested chart images.
