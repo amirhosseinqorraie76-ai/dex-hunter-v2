@@ -5,6 +5,10 @@
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1507608801",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|6665909136",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|98529959",
+      "4Ye6Y6Vaic8cyPdfW2f9PcLhXkysBtSmV84G8X7spump|1012061523",
+      "4Ye6Y6Vaic8cyPdfW2f9PcLhXkysBtSmV84G8X7spump|1507608801",
+      "4Ye6Y6Vaic8cyPdfW2f9PcLhXkysBtSmV84G8X7spump|6665909136",
+      "4Ye6Y6Vaic8cyPdfW2f9PcLhXkysBtSmV84G8X7spump|98529959",
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|1012061523",
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|1507608801",
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|6665909136",
@@ -189,9 +193,21 @@
       "url": "https://dexscreener.com/solana/5e3dxlxgwmtdcoka51wyyakttjfzbwqcoyuhbui5gt2m",
       "created_ts": 1787660841.0,
       "registered_at": 1795292839.453824
+    },
+    "4Ye6Y6Vaic8cyPdfW2f9PcLhXkysBtSmV84G8X7spump": {
+      "ath": 0.0008640397916500076,
+      "name": "greg",
+      "symbol": "greg",
+      "sources": [
+        "DexScreener",
+        "GeckoTerminal"
+      ],
+      "url": "https://dexscreener.com/solana/4s8cabvgadhopkkbitjdqz4tfqxkuczhwdfy8hlvubdq",
+      "created_ts": 1794364063.0,
+      "registered_at": 1795293003.5821605
     }
   },
-  "ath_cursor": 18,
-  "breakout_cursor": 0,
+  "ath_cursor": 1,
+  "breakout_cursor": 5,
   "buy_cursor": 0
 }
