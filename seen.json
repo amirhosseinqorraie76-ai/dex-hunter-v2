@@ -24,7 +24,11 @@
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|1012061523",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|1507608801",
       "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|6665909136",
-      "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|98529959"
+      "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr|98529959",
+      "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|1012061523",
+      "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|1507608801",
+      "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|6665909136",
+      "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump|98529959"
     ],
     "volume": [
       "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1012061523",
@@ -173,9 +177,21 @@
       "url": "https://dexscreener.com/solana/ho1asg6wgh1ffxdehrk2f4ggt1hoxo9s5jclmdqeyebz",
       "created_ts": 1792946595.0,
       "registered_at": 1795292801.801536
+    },
+    "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump": {
+      "ath": 0.015119546106163678,
+      "name": "GTA6CAT",
+      "symbol": "GATO",
+      "sources": [
+        "DexScreener",
+        "GeckoTerminal"
+      ],
+      "url": "https://dexscreener.com/solana/5e3dxlxgwmtdcoka51wyyakttjfzbwqcoyuhbui5gt2m",
+      "created_ts": 1787660841.0,
+      "registered_at": 1795292839.453824
     }
   },
-  "ath_cursor": 13,
-  "breakout_cursor": 35,
+  "ath_cursor": 18,
+  "breakout_cursor": 0,
   "buy_cursor": 0
 }
