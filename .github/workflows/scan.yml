@@ -1,5 +1,5 @@
 
-name: DEX Hunter V10
+name: DEX Hunter V14
 
 on:
   schedule:
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -30,17 +30,21 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run scanner
+      - name: Run DEX Hunter V14
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python bot.py
+        run: |
+          python bot.py
 
-      - name: Save scanner memory
+      - name: Save tracking database
+        if: always()
         run: |
           git config user.name "DEX Hunter"
-          git config user.email "actions@github.com"
+          git config user.email "dex-hunter@users.noreply.github.com"
           git add seen.json
-          git diff --cached --quiet || git commit -m "Update DEX Hunter V10 memory"
+          git diff --cached --quiet || git commit -m "Update DEX Hunter tracking database"
           git push
