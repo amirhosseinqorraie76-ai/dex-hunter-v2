@@ -155,12 +155,9 @@
       "ath": 0.13074717978094758,
       "name": "Catecoin",
       "symbol": "CATE",
-      "sources": [
-        "GeckoTerminal"
-      ],
-      "url": "https://dexscreener.com/solana/hmzvseemtzhhvznw9uwbag85hctmfnkbhzux16cy7ca3",
       "created_ts": 1785083563.0,
-      "registered_at": 1795291961.5282185
+      "registered_at": 1795291961.5282185,
+      "url": "https://dexscreener.com/solana/hmzvseemtzhhvznw9uwbag85hctmfnkbhzux16cy7ca3"
     },
     "Bv1a7cEj5aRnJQhMw4kRQqAFesMSd5LwcDnUzq52BMmr": {
       "ath": 0.016024056100555534,
@@ -250,8 +247,8 @@
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 5,
-  "breakout_cursor": 10,
+  "ath_cursor": 10,
+  "breakout_cursor": 15,
   "buy_cursor": 0,
   "telegram_update_offset": 435217151
 }
