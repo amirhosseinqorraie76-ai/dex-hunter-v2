@@ -13,6 +13,10 @@
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|1507608801",
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|6665909136",
       "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx|98529959",
+      "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|1012061523",
+      "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|1507608801",
+      "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|6665909136",
+      "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|98529959",
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|1012061523",
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|1507608801",
       "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump|6665909136",
@@ -220,10 +224,21 @@
       "url": "https://dexscreener.com/solana/djbltx1hrgzzrjgj7cwtx6sn3d7tbliytkgwombuwtvb",
       "created_ts": 1795121609.0,
       "registered_at": 1795296876.3012352
+    },
+    "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump": {
+      "ath": 0.001259532222640094,
+      "name": "Singularity",
+      "symbol": "Singularity",
+      "sources": [
+        "GeckoTerminal"
+      ],
+      "url": "https://dexscreener.com/solana/58xqwpxdgp3gfu9dafxs8c1gjwtldhdqhjrofaf5ywtv",
+      "created_ts": 1795205185.0,
+      "registered_at": 1795298200.652544
     }
   },
-  "ath_cursor": 17,
-  "breakout_cursor": 25,
+  "ath_cursor": 1,
+  "breakout_cursor": 30,
   "buy_cursor": 0,
   "telegram_update_offset": 435217149
 }
