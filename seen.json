@@ -64,6 +64,10 @@
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1507608801",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|6665909136",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1012061523",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1507608801",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|6665909136",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|98529959",
       "BSsmLA6UN8fzJ8qUkV4KwC5LxR7ab3TaUtcwvAyJpump|1012061523",
       "BSsmLA6UN8fzJ8qUkV4KwC5LxR7ab3TaUtcwvAyJpump|1507608801",
       "BSsmLA6UN8fzJ8qUkV4KwC5LxR7ab3TaUtcwvAyJpump|6665909136",
@@ -428,6 +432,6 @@
     ],
     "ath_breakout": []
   },
-  "ath_cursor": 16,
-  "breakout_cursor": 35
+  "ath_cursor": 1,
+  "breakout_cursor": 1
 }
