@@ -254,7 +254,7 @@
     }
   },
   "ath_cursor": 16,
-  "breakout_cursor": 8,
+  "breakout_cursor": 0,
   "buy_cursor": 0,
-  "telegram_update_offset": 435217149
+  "telegram_update_offset": 435217151
 }
