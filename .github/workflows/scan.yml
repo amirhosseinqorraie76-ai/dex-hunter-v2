@@ -1,5 +1,4 @@
-
-name: DEX Hunter V16
+name: DEX Hunter V17 - Smart Recovery
 
 on:
   schedule:
@@ -34,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests matplotlib
 
-      - name: Run DEX Hunter V16
+      - name: Run DEX Hunter V17
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
@@ -42,11 +41,14 @@ jobs:
         run: |
           python bot.py
 
-      - name: Save tracking database
+      - name: Save tracking databases
         if: always()
         run: |
           git config user.name "DEX Hunter"
           git config user.email "dex-hunter@users.noreply.github.com"
-          git add seen.json
-          git diff --cached --quiet || git commit -m "Update DEX Hunter V16 tracking database"
+
+          git add seen.json recovery.json performance.json
+
+          git diff --cached --quiet || git commit -m "Update DEX Hunter V17 databases"
+
           git push
