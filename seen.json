@@ -163,12 +163,9 @@
       "ath": 0.016024056100555534,
       "name": "FLOAT",
       "symbol": "FLOAT",
-      "sources": [
-        "GeckoTerminal"
-      ],
-      "url": "https://dexscreener.com/solana/fjk9sajdc2q4herppu3ylzkmf2zbyzkpihqlv9e2bn5a",
       "created_ts": 1793225743.0,
-      "registered_at": 1795292053.7717087
+      "registered_at": 1795292053.7717087,
+      "url": "https://dexscreener.com/solana/fjk9sajdc2q4herppu3ylzkmf2zbyzkpihqlv9e2bn5a"
     },
     "ApZuxdpzMrbEYTGEzeY9afh5pj9d6qPRJCTgQYiipbKg": {
       "ath": 0.03447577078179148,
@@ -244,8 +241,8 @@
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 11,
-  "breakout_cursor": 35,
+  "ath_cursor": 16,
+  "breakout_cursor": 40,
   "buy_cursor": 0,
-  "telegram_update_offset": 435217151
+  "telegram_update_offset": 435217152
 }
