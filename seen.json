@@ -220,12 +220,9 @@
       "ath": 0.0036031421671665078,
       "name": "Fiona the Hippo",
       "symbol": "FIONA",
-      "sources": [
-        "GeckoTerminal"
-      ],
-      "url": "https://dexscreener.com/solana/djbltx1hrgzzrjgj7cwtx6sn3d7tbliytkgwombuwtvb",
       "created_ts": 1795121609.0,
-      "registered_at": 1795296876.3012352
+      "registered_at": 1795296876.3012352,
+      "url": "https://dexscreener.com/solana/djbltx1hrgzzrjgj7cwtx6sn3d7tbliytkgwombuwtvb"
     },
     "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump": {
       "ath": 0.001259532222640094,
@@ -247,8 +244,8 @@
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 15,
-  "breakout_cursor": 20,
+  "ath_cursor": 20,
+  "breakout_cursor": 25,
   "buy_cursor": 0,
   "telegram_update_offset": 435217151
 }
