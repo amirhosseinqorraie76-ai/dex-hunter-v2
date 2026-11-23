@@ -238,8 +238,8 @@
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 3,
-  "breakout_cursor": 10,
+  "ath_cursor": 8,
+  "breakout_cursor": 15,
   "buy_cursor": 0,
   "telegram_update_offset": 435217154
 }
