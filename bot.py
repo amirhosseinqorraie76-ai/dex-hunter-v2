@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V18 - LOW CAP DISCOVERY
+DEX HUNTER V19 - SMART DISCOVERY
 
 SOURCES:
 1. DexScreener
@@ -17,21 +17,24 @@ SCANNERS:
 - ATH DROP
 - SMART RECOVERY
 - BOTTOM FORMING
-- RECOVERY
 - CONFIRMED REVERSAL
 - ATH BREAKOUT
 - ATH RECLAIM
 - TELEGRAM FORWARDED CHARTS
 
-V18:
-- No mandatory market-cap gate.
-- Low-cap and unknown-market-cap tokens are allowed.
-- DEXTools hot-pairs fetched once per hour.
-- Historical ATH window up to 990 days.
-- Historical candle gap tolerance: 7 days.
-- Pair creation time is used as fallback history start.
+V19 IMPROVEMENTS:
+- Robust DEXTools response parsing.
+- Strict Solana mint validation.
+- DEXTools rejection diagnostics.
+- No mandatory market-cap filter.
+- Unknown market cap allowed.
 - No volume filter.
 - No minimum technical score.
+- Better API error reporting.
+- In-run GET cache.
+- Better Telegram error diagnostics.
+- Historical ATH up to 990 days.
+- Pair creation fallback for history start.
 - No automatic trading.
 """
 
@@ -57,7 +60,7 @@ from matplotlib.patches import Rectangle
 # CONFIG
 # =========================================================
 
-VERSION = "V18 LOW CAP DISCOVERY"
+VERSION = "V19 SMART DISCOVERY"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 COINGECKO_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
@@ -86,44 +89,38 @@ MORALIS = "https://solana-gateway.moralis.io"
 HTTP_TIMEOUT = 20
 MAX_SOURCE_ROWS = 100
 
-# Low-cap reference only.
-# This is NOT a filtering threshold.
-LOW_CAP_REFERENCE = 5_000
+LOW_CAP_REFERENCE = 5000
 
-# ATH DROP
 MIN_ATH_DROP = 30.0
 ATH_CHECKS_PER_RUN = 5
 ATH_MAX_AGE_DAYS = 990
 ATH_HISTORY_GAP_DAYS = 7
 
-# SMART RECOVERY
 RECOVERY_CHECKS_PER_RUN = 20
 
-# ATH BREAKOUT
 BREAKOUT_CHECKS_PER_RUN = 5
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_MAX_AGE_DAYS = 990
 
-# DEXTools
 APISH_FETCH_INTERVAL = 3600
 
-# Candles
 CANDLE_4H_LIMIT = 100
 CANDLE_1D_LIMIT = 1000
 
-# Telegram
 TELEGRAM_UPDATES_LIMIT = 30
 
-# Alert cooldowns
 WATCH_COOLDOWN = 12 * 3600
 RECOVERY_COOLDOWN = 12 * 3600
 STRONG_COOLDOWN = 24 * 3600
 
-# Files
 SEEN_FILE = Path("seen.json")
 RECOVERY_FILE = Path("recovery.json")
 PERFORMANCE_FILE = Path("performance.json")
 CHART_DIR = Path("charts")
+
+SOLANA_MINT_PATTERN = re.compile(
+    r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+)
 
 ADDRESS_PATTERN = re.compile(
     r"(?<![1-9A-HJ-NP-Za-km-z])"
@@ -132,12 +129,15 @@ ADDRESS_PATTERN = re.compile(
 )
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V18/1.0",
+    "User-Agent": "DEX-HUNTER-V19/1.0",
     "Accept": "application/json",
 }
 
 session = requests.Session()
 session.headers.update(HEADERS)
+
+JSON_CACHE = {}
+JSON_CACHE_SECONDS = 25
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,6 +187,11 @@ def timestamp(value):
     if value is None:
         return None
 
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+
     if isinstance(value, str):
         try:
             dt = datetime.fromisoformat(
@@ -213,10 +218,12 @@ def timestamp(value):
 
 
 def valid_mint(mint):
-    return (
-        isinstance(mint, str)
-        and 32 <= len(mint) <= 44
-    )
+    if not isinstance(mint, str):
+        return False
+
+    mint = mint.strip()
+
+    return bool(SOLANA_MINT_PATTERN.fullmatch(mint))
 
 
 def dex_url(mint):
@@ -224,20 +231,24 @@ def dex_url(mint):
 
 
 def history_start_ts(item):
-    """
-    Earliest available history start.
-
-    Token creation time is preferred.
-    Pair creation time is only a fallback.
-    Pair creation does not necessarily equal token creation.
-    """
     return first(
         item.get("created_ts"),
         item.get("pair_created_ts"),
     )
 
 
-def get_json(url, params=None, headers=None):
+def get_json(url, params=None, headers=None, cache_seconds=0):
+    cache_key = (
+        url,
+        json.dumps(params or {}, sort_keys=True),
+    )
+
+    if cache_seconds:
+        cached = JSON_CACHE.get(cache_key)
+
+        if cached and now() - cached["time"] < cache_seconds:
+            return cached["data"]
+
     try:
         response = session.get(
             url,
@@ -247,48 +258,129 @@ def get_json(url, params=None, headers=None):
         )
 
         if response.status_code == 429:
-            logging.warning("Rate limited: %s", url)
+            retry_after = response.headers.get("Retry-After")
+            logging.warning(
+                "Rate limited: %s | retry_after=%s",
+                url,
+                retry_after,
+            )
             return None
 
         response.raise_for_status()
-        return response.json()
 
-    except Exception as exc:
-        logging.warning("API error %s: %s", url, exc)
+        try:
+            payload = response.json()
+        except ValueError:
+            logging.warning(
+                "Invalid JSON response: %s",
+                url,
+            )
+            return None
+
+        if cache_seconds:
+            JSON_CACHE[cache_key] = {
+                "time": now(),
+                "data": payload,
+            }
+
+        return payload
+
+    except requests.RequestException as exc:
+        logging.warning(
+            "API error %s: %s",
+            url,
+            exc,
+        )
         return None
 
 
 def rows_from(payload):
+    """
+    Find arrays of row dictionaries in common API wrappers.
+    Supports API.SH pairs, nested data and raw structures.
+    """
+
     if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
+        return [
+            row for row in payload
+            if isinstance(row, dict)
+        ]
 
     if not isinstance(payload, dict):
         return []
 
-    for key in (
-        "tokens", "coins", "items", "results",
-        "pools", "data", "pairs", "hot_pairs",
-    ):
+    preferred = (
+        "pairs",
+        "hot_pairs",
+        "tokens",
+        "coins",
+        "items",
+        "results",
+        "pools",
+    )
+
+    for key in preferred:
         value = payload.get(key)
 
         if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
+            return [
+                row for row in value
+                if isinstance(row, dict)
+            ]
+
+    for key in ("data", "result", "raw"):
+        value = payload.get(key)
+
+        if isinstance(value, list):
+            return [
+                row for row in value
+                if isinstance(row, dict)
+            ]
 
         if isinstance(value, dict):
-            for nested in (
-                "tokens", "coins", "items",
-                "results", "pools", "pairs",
-                "hot_pairs",
-            ):
-                inner = value.get(nested)
+            found = rows_from(value)
 
-                if isinstance(inner, list):
-                    return [
-                        x for x in inner
-                        if isinstance(x, dict)
-                    ]
+            if found:
+                return found
 
     return []
+
+
+def nested_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def deep_value(data, keys, max_depth=4):
+    """
+    Search only for named fields.
+    Does not treat pair/pool addresses as token addresses.
+    """
+
+    if not isinstance(data, dict):
+        return None
+
+    wanted = set(keys)
+
+    def walk(obj, depth):
+        if not isinstance(obj, dict) or depth > max_depth:
+            return None
+
+        for key in keys:
+            value = obj.get(key)
+
+            if value is not None and value != "":
+                return value
+
+        for value in obj.values():
+            if isinstance(value, dict):
+                result = walk(value, depth + 1)
+
+                if result is not None:
+                    return result
+
+        return None
+
+    return walk(data, 0)
 
 
 # =========================================================
@@ -300,13 +392,18 @@ def read_json(path, default):
         return default
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(
+            path.read_text(encoding="utf-8")
+        )
 
         if isinstance(data, dict):
             return data
 
     except Exception:
-        logging.exception("Could not read %s", path)
+        logging.exception(
+            "Could not read %s",
+            path,
+        )
 
     return default
 
@@ -315,7 +412,11 @@ def write_json(path, data):
     temp = path.with_suffix(".tmp")
 
     temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -342,7 +443,10 @@ def empty_seen():
 
 
 def load_seen():
-    state = read_json(SEEN_FILE, empty_seen())
+    state = read_json(
+        SEEN_FILE,
+        empty_seen(),
+    )
 
     state.setdefault("sent", {})
     state.setdefault("ath_watch", {})
@@ -353,8 +457,12 @@ def load_seen():
     state.setdefault("last_apish_fetch_ts", 0)
 
     for key in (
-        "ath", "breakout", "watch",
-        "recovery", "strong", "ath_reclaim"
+        "ath",
+        "breakout",
+        "watch",
+        "recovery",
+        "strong",
+        "ath_reclaim",
     ):
         state["sent"].setdefault(key, [])
 
@@ -389,30 +497,14 @@ def load_performance():
 # =========================================================
 
 def daily_reset(state, recovery):
-    """
-    Reset daily operational memory.
-
-    Preserve:
-    - ATH history
-    - Telegram update offset
-    - DEXTools hourly fetch timestamp
-    - Performance history
-
-    Reset:
-    - Daily alert memory
-    - Daily recovery tracking
-    - Daily scan cursors
-    """
-
     today = utc_day()
-    previous = state.get("daily_reset_date")
 
-    if previous == today:
+    if state.get("daily_reset_date") == today:
         return False
 
     logging.info(
         "DAILY RESET: %s -> %s",
-        previous,
+        state.get("daily_reset_date"),
         today,
     )
 
@@ -431,12 +523,13 @@ def daily_reset(state, recovery):
     recovery["tokens"] = {}
     recovery["cursor"] = 0
 
+    # Preserve ATH history, Telegram offset,
+    # performance and API.SH fetch timestamp.
+
     state["daily_reset_date"] = today
 
     write_json(SEEN_FILE, state)
     write_json(RECOVERY_FILE, recovery)
-
-    logging.info("Daily memory successfully reset.")
 
     return True
 
@@ -461,11 +554,25 @@ def telegram_request(method, **kwargs):
             timeout=HTTP_TIMEOUT,
         )
 
-        response.raise_for_status()
+        if not response.ok:
+            logging.warning(
+                "Telegram HTTP error | method=%s | status=%s | body=%s",
+                method,
+                response.status_code,
+                response.text[:500],
+            )
+            return None
+
         result = response.json()
 
         if result.get("ok"):
             return result.get("result")
+
+        logging.warning(
+            "Telegram rejected request | method=%s | description=%s",
+            method,
+            result.get("description"),
+        )
 
     except Exception as exc:
         logging.warning(
@@ -506,11 +613,29 @@ def send_photo(chat_id, filename):
                 timeout=HTTP_TIMEOUT,
             )
 
-        response.raise_for_status()
-        return bool(response.json().get("ok"))
+        if not response.ok:
+            logging.warning(
+                "Telegram photo HTTP error | status=%s | body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            return False
+
+        payload = response.json()
+
+        if not payload.get("ok"):
+            logging.warning(
+                "Telegram photo rejected: %s",
+                payload.get("description"),
+            )
+
+        return bool(payload.get("ok"))
 
     except Exception as exc:
-        logging.warning("Photo send failed: %s", exc)
+        logging.warning(
+            "Photo send failed: %s",
+            exc,
+        )
         return False
 
 
@@ -541,25 +666,35 @@ def deliver(state, category, mint, message):
 # =========================================================
 
 def normalize(row, source):
-    attrs = row.get("attributes") or {}
-    rels = row.get("relationships") or {}
+    if not isinstance(row, dict):
+        return None
 
-    base = row.get("baseToken") or {}
-    token = row.get("token") or {}
+    attrs = nested_dict(row.get("attributes"))
+    rels = nested_dict(row.get("relationships"))
+
+    token = nested_dict(row.get("token"))
+    base = nested_dict(row.get("baseToken"))
 
     base_id = (
-        (rels.get("base_token") or {}).get("data") or {}
-    ).get("id")
+        nested_dict(rels.get("base_token"))
+        .get("data") or {}
+    )
+
+    base_id = (
+        base_id.get("id")
+        if isinstance(base_id, dict)
+        else None
+    )
 
     mint = first(
         row.get("mint"),
-        row.get("address"),
-        row.get("tokenAddress"),
         row.get("token_address"),
+        row.get("tokenAddress"),
         row.get("contractAddress"),
         row.get("baseTokenAddress"),
-        row.get("tokenAddress"),
+        row.get("address"),
         token.get("address"),
+        base.get("address"),
         attrs.get("address"),
         attrs.get("mint"),
         (
@@ -574,6 +709,8 @@ def normalize(row, source):
 
     created = first(
         row.get("created_timestamp"),
+        row.get("token_created_at"),
+        row.get("tokenCreatedAt"),
         row.get("createdAt"),
         row.get("created_at"),
         row.get("createdAtUnix"),
@@ -582,13 +719,13 @@ def normalize(row, source):
         row.get("timestamp"),
         attrs.get("created_timestamp"),
         attrs.get("created_at"),
-        attrs.get("pool_created_at"),
     )
 
     pair_created = first(
         row.get("pairCreatedAt"),
         row.get("pair_created_at"),
         row.get("poolCreatedAt"),
+        row.get("created_at"),
         attrs.get("pair_created_at"),
         attrs.get("pool_created_at"),
     )
@@ -661,12 +798,17 @@ def add_candidate(store, candidate):
     )
 
     for key in (
-        "name", "symbol", "price",
-        "market_cap", "created_ts",
-        "pair_created_ts", "url",
+        "name",
+        "symbol",
+        "price",
+        "market_cap",
+        "created_ts",
+        "pair_created_ts",
+        "url",
     ):
         if old.get(key) is None or old.get(key) in (
-            "Unknown", "???"
+            "Unknown",
+            "???",
         ):
             if candidate.get(key) is not None:
                 old[key] = candidate[key]
@@ -713,18 +855,29 @@ def source_dexscreener(store):
 
 
 def source_gecko(store):
-    for endpoint in ("new_pools", "trending_pools"):
+    for endpoint in (
+        "new_pools",
+        "trending_pools",
+    ):
         payload = get_json(
             f"{GECKO}/networks/solana/{endpoint}",
             {"page": 1},
+            cache_seconds=10,
         )
 
         for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
-            rels = row.get("relationships") or {}
+            rels = nested_dict(row.get("relationships"))
+
+            base_data = (
+                nested_dict(rels.get("base_token"))
+                .get("data") or {}
+            )
 
             base_id = (
-                (rels.get("base_token") or {}).get("data") or {}
-            ).get("id")
+                base_data.get("id")
+                if isinstance(base_data, dict)
+                else None
+            )
 
             mint = (
                 base_id.split("_", 1)[1]
@@ -735,7 +888,7 @@ def source_gecko(store):
             if not valid_mint(mint):
                 continue
 
-            attrs = row.get("attributes") or {}
+            attrs = nested_dict(row.get("attributes"))
 
             candidate = normalize(
                 {
@@ -762,7 +915,10 @@ def source_pump(store):
     )
 
     for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
-        add_candidate(store, normalize(row, "Pump.fun"))
+        add_candidate(
+            store,
+            normalize(row, "Pump.fun"),
+        )
 
 
 def source_stonk(store):
@@ -776,15 +932,24 @@ def source_stonk(store):
     )
 
     for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
-        add_candidate(store, normalize(row, "Stonk.fun"))
+        add_candidate(
+            store,
+            normalize(row, "Stonk.fun"),
+        )
 
 
 def source_void(store):
     endpoints = [
-        (f"{VOID}/api-trending", {"chain": "solana"}),
+        (
+            f"{VOID}/api-trending",
+            {"chain": "solana"},
+        ),
         (
             f"{VOID}/api-tokens",
-            {"chain": "solana", "limit": MAX_SOURCE_ROWS},
+            {
+                "chain": "solana",
+                "limit": MAX_SOURCE_ROWS,
+            },
         ),
     ]
 
@@ -792,24 +957,159 @@ def source_void(store):
         payload = get_json(url, params)
 
         for row in rows_from(payload)[:MAX_SOURCE_ROWS]:
-            add_candidate(store, normalize(row, "VoidScreener"))
+            add_candidate(
+                store,
+                normalize(row, "VoidScreener"),
+            )
 
 
 # =========================================================
-# DEXTOOLS VIA API.SH
+# DEXTOOLS VIA API.SH - V19
 # =========================================================
+
+def dextools_token_address(row):
+    """
+    Extract only token contract address.
+    Never use pair/pool address as token address.
+    """
+
+    if not isinstance(row, dict):
+        return None
+
+    token = nested_dict(row.get("token"))
+    base = nested_dict(row.get("baseToken"))
+    attrs = nested_dict(row.get("attributes"))
+    raw = nested_dict(row.get("raw"))
+
+    possible = [
+        row.get("token_address"),
+        row.get("tokenAddress"),
+        row.get("baseTokenAddress"),
+        row.get("base_token_address"),
+        row.get("contractAddress"),
+        row.get("mint"),
+        token.get("address"),
+        token.get("token_address"),
+        base.get("address"),
+        base.get("token_address"),
+        attrs.get("address"),
+        attrs.get("mint"),
+        raw.get("token_address"),
+        raw.get("tokenAddress"),
+    ]
+
+    for value in possible:
+        if valid_mint(value):
+            return value.strip()
+
+    # Some wrappers put token data under data.
+    for key in ("data", "result"):
+        nested = row.get(key)
+
+        if isinstance(nested, dict):
+            result = dextools_token_address(nested)
+
+            if result:
+                return result
+
+    return None
+
+
+def dextools_row_candidate(row):
+    if not isinstance(row, dict):
+        return None, "not_dict"
+
+    chain = str(
+        first(
+            row.get("chain"),
+            row.get("chainId"),
+            "",
+        )
+    ).lower()
+
+    if chain and chain not in (
+        "solana",
+        "sol",
+    ):
+        return None, "wrong_chain"
+
+    mint = dextools_token_address(row)
+
+    if not mint:
+        return None, "missing_or_invalid_token_address"
+
+    token = nested_dict(row.get("token"))
+    base = nested_dict(row.get("baseToken"))
+    raw = nested_dict(row.get("raw"))
+
+    name = first(
+        row.get("name"),
+        token.get("name"),
+        base.get("name"),
+        raw.get("name"),
+        "Unknown",
+    )
+
+    symbol = first(
+        row.get("symbol"),
+        token.get("symbol"),
+        base.get("symbol"),
+        raw.get("symbol"),
+        "???",
+    )
+
+    # DEXTools created_at is pair creation time.
+    pair_created = first(
+        row.get("created_at"),
+        row.get("createdAt"),
+        row.get("pair_created_at"),
+        row.get("pairCreatedAt"),
+        raw.get("created_at"),
+    )
+
+    data = {
+        "mint": mint,
+        "name": name,
+        "symbol": symbol,
+        "price_usd": first(
+            row.get("price_usd"),
+            row.get("priceUsd"),
+            raw.get("price_usd"),
+        ),
+        "market_cap_usd": first(
+            row.get("market_cap_usd"),
+            row.get("marketCap"),
+            row.get("fdv"),
+            raw.get("market_cap_usd"),
+        ),
+        "pair_created_at": pair_created,
+        "liquidity_usd": first(
+            row.get("liquidity_usd"),
+            row.get("liquidityUsd"),
+            raw.get("liquidity_usd"),
+        ),
+        "url": first(
+            row.get("url"),
+            row.get("pair_url"),
+            raw.get("url"),
+        ),
+    }
+
+    candidate = normalize(
+        data,
+        "DEXTools",
+    )
+
+    if not candidate:
+        return None, "normalization_failed"
+
+    return candidate, None
+
 
 def source_dextools(store, state):
-    """
-    Fetch DEXTools hot pairs through API.SH.
-
-    Fetch interval: 1 hour.
-    APISH_KEY must be stored in GitHub Actions Secrets.
-    """
-
     if not APISH_KEY:
         logging.warning(
-            "DEXTools skipped: APISH_KEY secret is missing."
+            "DEXTools skipped: APISH_KEY is missing."
         )
         return 0
 
@@ -826,7 +1126,9 @@ def source_dextools(store, state):
         )
         return 0
 
-    logging.info("Fetching DEXTools hot pairs...")
+    logging.info(
+        "DEXTools request started | chain=solana"
+    )
 
     payload = get_json(
         APISH_DEXTOOLS,
@@ -839,88 +1141,73 @@ def source_dextools(store, state):
 
     if payload is None:
         logging.warning(
-            "DEXTools request failed. Fetch timestamp unchanged."
+            "DEXTools request failed. Timestamp unchanged."
+        )
+        return 0
+
+    if (
+        isinstance(payload, dict)
+        and payload.get("success") is False
+    ):
+        logging.warning(
+            "DEXTools API returned unsuccessful response: %s",
+            payload.get("error"),
         )
         return 0
 
     rows = rows_from(payload)
+
+    logging.info(
+        "DEXTools response parsed | rows=%d | top_keys=%s",
+        len(rows),
+        list(payload.keys())[:20]
+        if isinstance(payload, dict)
+        else type(payload).__name__,
+    )
+
     added = 0
+    rejected = {}
 
     for row in rows[:MAX_SOURCE_ROWS]:
-        candidate = normalize(row, "DEXTools")
+        candidate, reason = dextools_row_candidate(row)
 
         if not candidate:
-            # Try common nested token structures.
-            token = row.get("token") or {}
-            base = row.get("baseToken") or {}
-
-            mint = first(
-                row.get("token_address"),
-                row.get("tokenAddress"),
-                row.get("address"),
-                row.get("baseTokenAddress"),
-                token.get("address"),
-                base.get("address"),
+            rejected[reason or "unknown"] = (
+                rejected.get(reason or "unknown", 0) + 1
             )
+            continue
 
-            if not valid_mint(mint):
-                continue
+        mint = candidate["mint"]
 
-            candidate = normalize(
-                {
-                    "mint": mint,
-                    "name": first(
-                        row.get("name"),
-                        token.get("name"),
-                        base.get("name"),
-                    ),
-                    "symbol": first(
-                        row.get("symbol"),
-                        token.get("symbol"),
-                        base.get("symbol"),
-                    ),
-                    "price_usd": first(
-                        row.get("price_usd"),
-                        row.get("priceUsd"),
-                    ),
-                    "market_cap_usd": first(
-                        row.get("market_cap_usd"),
-                        row.get("marketCap"),
-                        row.get("fdv"),
-                    ),
-                    "created_at": first(
-                        row.get("created_at"),
-                        row.get("createdAt"),
-                    ),
-                    "pair_created_at": first(
-                        row.get("pair_created_at"),
-                        row.get("pairCreatedAt"),
-                    ),
-                    "liquidity_usd": first(
-                        row.get("liquidity_usd"),
-                        row.get("liquidityUsd"),
-                    ),
-                    "url": first(
-                        row.get("url"),
-                        row.get("pair_url"),
-                    ),
-                },
-                "DEXTools",
-            )
+        existed = mint in store
 
-        if candidate:
-            add_candidate(store, candidate)
+        add_candidate(store, candidate)
+
+        if not existed:
             added += 1
 
-    # Update only after a successful JSON response.
+    # Successful API response, even if no rows are usable.
     state["last_apish_fetch_ts"] = now()
     write_json(SEEN_FILE, state)
 
     logging.info(
-        "DEXTools successful response | rows=%d | accepted=%d",
+        "DEXTools result | rows=%d | new_tokens=%d | rejected=%s",
         len(rows),
         added,
+        rejected,
     )
+
+    if rows and added == 0:
+        sample = rows[0]
+
+        logging.warning(
+            "DEXTools zero accepted diagnostic | "
+            "sample_keys=%s | sample_chain=%s | "
+            "sample_token_address=%s",
+            list(sample.keys())[:30],
+            sample.get("chain"),
+            str(sample.get("token_address"))[:60],
+        )
 
     return added
 
@@ -936,7 +1223,8 @@ def enrich(store):
         batch = mints[start:start + 30]
 
         payload = get_json(
-            f"{DEX}/tokens/v1/solana/{','.join(batch)}"
+            f"{DEX}/tokens/v1/solana/{','.join(batch)}",
+            cache_seconds=10,
         )
 
         if not isinstance(payload, list):
@@ -949,7 +1237,7 @@ def enrich(store):
             if pair.get("chainId") != "solana":
                 continue
 
-            base = pair.get("baseToken") or {}
+            base = nested_dict(pair.get("baseToken"))
             mint = base.get("address")
 
             if mint not in store:
@@ -958,10 +1246,12 @@ def enrich(store):
             item = store[mint]
 
             liquidity = number(
-                (pair.get("liquidity") or {}).get("usd")
+                nested_dict(pair.get("liquidity")).get("usd")
             ) or 0.0
 
-            if liquidity >= item.get("liquidity", 0):
+            if liquidity >= (
+                number(item.get("liquidity")) or 0
+            ):
                 item["liquidity"] = liquidity
 
                 item["price"] = (
@@ -975,11 +1265,21 @@ def enrich(store):
                     or item.get("market_cap")
                 )
 
-                item["name"] = base.get("name") or item["name"]
-                item["symbol"] = base.get("symbol") or item["symbol"]
-                item["url"] = pair.get("url") or item.get("url")
+                item["name"] = (
+                    base.get("name") or item["name"]
+                )
 
-            pair_created = timestamp(pair.get("pairCreatedAt"))
+                item["symbol"] = (
+                    base.get("symbol") or item["symbol"]
+                )
+
+                item["url"] = (
+                    pair.get("url") or item.get("url")
+                )
+
+            pair_created = timestamp(
+                pair.get("pairCreatedAt")
+            )
 
             if pair_created:
                 old = item.get("pair_created_ts")
@@ -1005,7 +1305,13 @@ def extract_ohlcv(payload):
     except Exception:
         pass
 
-    for key in ("result", "data", "ohlcv", "candles", "items"):
+    for key in (
+        "result",
+        "data",
+        "ohlcv",
+        "candles",
+        "items",
+    ):
         value = payload.get(key)
 
         if isinstance(value, list):
@@ -1013,8 +1319,11 @@ def extract_ohlcv(payload):
 
         if isinstance(value, dict):
             for inner in (
-                "result", "data", "ohlcv",
-                "candles", "items"
+                "result",
+                "data",
+                "ohlcv",
+                "candles",
+                "items",
             ):
                 if isinstance(value.get(inner), list):
                     return value[inner]
@@ -1046,7 +1355,11 @@ def normalize_candles(raw):
             continue
 
         ts = timestamp(ts)
-        op, hi, lo, cl = map(number, (op, hi, lo, cl))
+
+        op, hi, lo, cl = map(
+            number,
+            (op, hi, lo, cl),
+        )
 
         if ts is None or any(
             x is None or x <= 0
@@ -1076,6 +1389,7 @@ def gecko_best_pool(mint):
     payload = get_json(
         f"{GECKO}/networks/solana/tokens/{mint}/pools",
         {"page": 1},
+        cache_seconds=20,
     )
 
     best = None
@@ -1083,8 +1397,8 @@ def gecko_best_pool(mint):
     best_side = None
 
     for row in rows_from(payload):
-        attrs = row.get("attributes") or {}
-        rels = row.get("relationships") or {}
+        attrs = nested_dict(row.get("attributes"))
+        rels = nested_dict(row.get("relationships"))
 
         pool_id = row.get("id")
 
@@ -1094,13 +1408,27 @@ def gecko_best_pool(mint):
             else attrs.get("address")
         )
 
+        base_data = (
+            nested_dict(rels.get("base_token"))
+            .get("data") or {}
+        )
+
+        quote_data = (
+            nested_dict(rels.get("quote_token"))
+            .get("data") or {}
+        )
+
         base_id = (
-            (rels.get("base_token") or {}).get("data") or {}
-        ).get("id")
+            base_data.get("id")
+            if isinstance(base_data, dict)
+            else None
+        )
 
         quote_id = (
-            (rels.get("quote_token") or {}).get("data") or {}
-        ).get("id")
+            quote_data.get("id")
+            if isinstance(quote_data, dict)
+            else None
+        )
 
         base_mint = (
             base_id.split("_", 1)[1]
@@ -1121,7 +1449,9 @@ def gecko_best_pool(mint):
         else:
             continue
 
-        liquidity = number(attrs.get("reserve_in_usd")) or 0
+        liquidity = number(
+            attrs.get("reserve_in_usd")
+        ) or 0
 
         if pool_address and liquidity > best_liquidity:
             best = pool_address
@@ -1132,7 +1462,9 @@ def gecko_best_pool(mint):
 
 
 def coingecko_ohlcv(pool, timeframe, aggregate, limit, side):
-    headers = {"accept": "application/json"}
+    headers = {
+        "accept": "application/json",
+    }
 
     if COINGECKO_KEY:
         headers["x-cg-demo-api-key"] = COINGECKO_KEY
@@ -1181,7 +1513,10 @@ def moralis_pairs(mint):
 
             pairs.append((address, liquidity))
 
-    pairs.sort(key=lambda x: x[1], reverse=True)
+    pairs.sort(
+        key=lambda x: x[1],
+        reverse=True,
+    )
 
     return [x[0] for x in pairs[:3]]
 
@@ -1232,35 +1567,51 @@ def get_candles(mint, timeframe="hour", aggregate=4, limit=100):
                     "currency": "usd",
                     "token": side,
                 },
+                cache_seconds=15,
             ),
         ))
 
+        if COINGECKO_KEY:
+            attempts.append((
+                "CoinGecko",
+                lambda: {
+                    "result": coingecko_ohlcv(
+                        pool,
+                        timeframe,
+                        aggregate,
+                        limit,
+                        side,
+                    )
+                },
+            ))
+
+    if MORALIS_KEY:
         attempts.append((
-            "CoinGecko",
+            "Moralis",
             lambda: {
-                "result": coingecko_ohlcv(
-                    pool, timeframe, aggregate, limit, side
+                "result": moralis_ohlcv(
+                    mint,
+                    timeframe,
+                    limit,
                 )
             },
         ))
 
-    attempts.append((
-        "Moralis",
-        lambda: {
-            "result": moralis_ohlcv(mint, timeframe, limit)
-        },
-    ))
-
     for provider, fetch in attempts:
         try:
+            payload = fetch()
+
             candles = normalize_candles(
-                extract_ohlcv(fetch())
+                extract_ohlcv(payload)
             )
 
             if len(candles) >= 2:
                 logging.info(
                     "Candles %s %s via %s: %d",
-                    mint, timeframe, provider, len(candles)
+                    mint,
+                    timeframe,
+                    provider,
+                    len(candles),
                 )
 
                 return candles
@@ -1302,10 +1653,7 @@ def observed_ath(mint, history_start):
 
     age = (now() - history_start) / 86400
 
-    if age > ATH_MAX_AGE_DAYS:
-        return None
-
-    if age < 0:
+    if age > ATH_MAX_AGE_DAYS or age < 0:
         return None
 
     candles = get_1d(mint)
@@ -1318,7 +1666,10 @@ def observed_ath(mint, history_start):
     ):
         return None
 
-    return max(x["high"] for x in candles)
+    return max(
+        candle["high"]
+        for candle in candles
+    )
 
 
 def ath_drop_filter(store, state):
@@ -1342,7 +1693,10 @@ def ath_drop_filter(store, state):
     if not candidates:
         return 0
 
-    cursor = int(state.get("ath_cursor", 0)) % len(candidates)
+    cursor = (
+        int(state.get("ath_cursor", 0))
+        % len(candidates)
+    )
 
     batch = (
         candidates[cursor:] + candidates[:cursor]
@@ -1358,7 +1712,10 @@ def ath_drop_filter(store, state):
         mint = item["mint"]
         history_start = history_start_ts(item)
 
-        ath = observed_ath(mint, history_start)
+        ath = observed_ath(
+            mint,
+            history_start,
+        )
 
         price = item.get("price") or 0
 
@@ -1371,6 +1728,7 @@ def ath_drop_filter(store, state):
             continue
 
         previous = state["ath_watch"].get(mint, {})
+
         old_ath = number(previous.get("ath")) or 0
         stored_ath = max(ath, old_ath)
 
@@ -1385,6 +1743,7 @@ def ath_drop_filter(store, state):
         }
 
         market_cap = number(item.get("market_cap"))
+
         market_cap_text = (
             f"${market_cap:,.0f}"
             if market_cap is not None
@@ -1392,7 +1751,7 @@ def ath_drop_filter(store, state):
         )
 
         message = (
-            "🎯 ATH DROP DETECTED | DEX HUNTER V18\n"
+            "🎯 ATH DROP DETECTED | DEX HUNTER V19\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 {item['name']} ({item['symbol']})\n"
             f"💰 Price: ${price:.10g}\n"
@@ -1413,7 +1772,12 @@ def ath_drop_filter(store, state):
             f"{mint}|{chat}" in state["sent"]["ath"]
             for chat in CHAT_IDS
         ):
-            if deliver(state, "ath", mint, message):
+            if deliver(
+                state,
+                "ath",
+                mint,
+                message,
+            ):
                 matches += 1
 
         time.sleep(0.4)
@@ -1422,14 +1786,14 @@ def ath_drop_filter(store, state):
 
     return matches
 
-
 # =========================================================
 # LIVE TOKEN DATA
 # =========================================================
 
 def live_token(mint):
     payload = get_json(
-        f"{DEX}/tokens/v1/solana/{mint}"
+        f"{DEX}/tokens/v1/solana/{mint}",
+        cache_seconds=10,
     )
 
     if not isinstance(payload, list):
@@ -1444,7 +1808,7 @@ def live_token(mint):
         if pair.get("chainId") != "solana":
             continue
 
-        base = pair.get("baseToken") or {}
+        base = nested_dict(pair.get("baseToken"))
 
         if base.get("address") != mint:
             continue
@@ -1455,7 +1819,7 @@ def live_token(mint):
             continue
 
         liquidity = number(
-            (pair.get("liquidity") or {}).get("usd")
+            nested_dict(pair.get("liquidity")).get("usd")
         ) or 0
 
         valid.append({
@@ -1483,19 +1847,6 @@ def live_token(mint):
 # =========================================================
 
 def analyze_recovery(item, candles):
-    """
-    Maximum technical score: 80.
-
-    ATH distance: 15
-    Bottom formation: 20
-    Structure change: 20
-    Resistance breakout: 15
-    Liquidity: 10
-
-    Score is informational only.
-    No minimum score blocks introduction.
-    """
-
     if len(candles) < 12:
         return None
 
@@ -1507,9 +1858,15 @@ def analyze_recovery(item, candles):
     ath = number(item.get("ath"))
 
     if not ath or ath <= 0:
-        ath = max(x["high"] for x in candles)
+        ath = max(
+            x["high"]
+            for x in candles
+        )
 
-    drop = max(0, (ath - price) / ath * 100)
+    drop = max(
+        0,
+        (ath - price) / ath * 100,
+    )
 
     score = 0
     details = {}
@@ -1529,10 +1886,17 @@ def analyze_recovery(item, candles):
     recent = candles[-6:]
     previous = candles[-12:-6]
 
-    recent_low = min(x["low"] for x in recent)
-    previous_low = min(x["low"] for x in previous)
+    recent_low = min(
+        x["low"] for x in recent
+    )
 
-    no_new_low = recent_low >= previous_low * 0.985
+    previous_low = min(
+        x["low"] for x in previous
+    )
+
+    no_new_low = (
+        recent_low >= previous_low * 0.985
+    )
 
     rising_lows = (
         candles[-1]["low"] > candles[-4]["low"]
@@ -1564,8 +1928,13 @@ def analyze_recovery(item, candles):
     last = candles[-1]
     old = candles[-7:-1]
 
-    old_high = max(x["high"] for x in old)
-    old_low = min(x["low"] for x in old)
+    old_high = max(
+        x["high"] for x in old
+    )
+
+    old_low = min(
+        x["low"] for x in old
+    )
 
     structure_score = 0
 
@@ -1582,7 +1951,8 @@ def analyze_recovery(item, candles):
     details["structure"] = structure_score
 
     resistance = max(
-        x["high"] for x in candles[-13:-1]
+        x["high"]
+        for x in candles[-13:-1]
     )
 
     breakout_score = 0
@@ -1652,15 +2022,21 @@ def recovery_message(item, result):
 
     if result["stage"] == "STRONG BUY":
         heading = "🟢🚨 STRONG BUY SIGNAL 🚨🟢"
-        urgency = "قیمت مقاومت اخیر را با کندل بسته‌شده شکسته است."
+        urgency = (
+            "قیمت مقاومت اخیر را با کندل بسته‌شده شکسته است."
+        )
 
     elif result["stage"] == "RECOVERY":
         heading = "🟢 RECOVERY SIGNAL"
-        urgency = "نشانه‌های تغییر ساختار و شروع بازگشت مشاهده شده است."
+        urgency = (
+            "نشانه‌های تغییر ساختار و شروع بازگشت مشاهده شده است."
+        )
 
     else:
         heading = "👁 WATCH ALERT"
-        urgency = "ارز شناسایی شده؛ هنوز بازگشت آن تأیید نشده است."
+        urgency = (
+            "ارز شناسایی شده؛ هنوز بازگشت آن تأیید نشده است."
+        )
 
     liquidity_text = (
         f"${result['liquidity']:,.0f}"
@@ -1669,6 +2045,7 @@ def recovery_message(item, result):
     )
 
     market_cap = number(item.get("market_cap"))
+
     market_cap_text = (
         f"${market_cap:,.0f}"
         if market_cap is not None
@@ -1764,8 +2141,10 @@ def update_performance(performance):
                 ("24h", 24),
                 ("7d", 168),
             )
-            if elapsed >= hours
-            and label not in signal.get("snapshots", {})
+            if (
+                elapsed >= hours
+                and label not in signal.get("snapshots", {})
+            )
         ]
 
         if not due:
@@ -1790,9 +2169,12 @@ def update_performance(performance):
 
         for label, hours in due:
             signal.setdefault("snapshots", {})
+
             signal["snapshots"][label] = {
                 "price": price,
-                "change_percent": (price / entry - 1) * 100,
+                "change_percent": (
+                    (price / entry - 1) * 100
+                ),
                 "recorded_at": now(),
             }
 
@@ -1801,7 +2183,12 @@ def update_performance(performance):
 # RECOVERY SCANNER
 # =========================================================
 
-def recovery_scanner(store, state, recovery, performance):
+def recovery_scanner(
+    store,
+    state,
+    recovery,
+    performance,
+):
     candidates = []
     existing = set()
 
@@ -1837,8 +2224,7 @@ def recovery_scanner(store, state, recovery, performance):
             candidates.append(item)
             existing.add(mint)
 
-    # New candidates.
-    # No market-cap gate, no volume gate, no score gate.
+    # New candidates: no market-cap or volume gate.
 
     for item in store.values():
         if (
@@ -1851,7 +2237,10 @@ def recovery_scanner(store, state, recovery, performance):
     if not candidates:
         return 0
 
-    cursor = int(recovery.get("cursor", 0)) % len(candidates)
+    cursor = (
+        int(recovery.get("cursor", 0))
+        % len(candidates)
+    )
 
     batch = (
         candidates[cursor:] + candidates[:cursor]
@@ -1871,7 +2260,10 @@ def recovery_scanner(store, state, recovery, performance):
         if len(candles) < 12:
             continue
 
-        result = analyze_recovery(item, candles)
+        result = analyze_recovery(
+            item,
+            candles,
+        )
 
         if not result:
             continue
@@ -1905,7 +2297,10 @@ def recovery_scanner(store, state, recovery, performance):
             category = "strong"
             cooldown = STRONG_COOLDOWN
 
-        previous = entry["last_alert"].get(category, 0)
+        previous = entry["last_alert"].get(
+            category,
+            0,
+        )
 
         if now() - previous < cooldown:
             entry["last_stage"] = stage
@@ -1921,12 +2316,16 @@ def recovery_scanner(store, state, recovery, performance):
 
         if (
             previous_stage
-            and rank.get(stage, 0) < rank.get(previous_stage, 0)
+            and rank.get(stage, 0)
+            < rank.get(previous_stage, 0)
         ):
             entry["last_stage"] = stage
             continue
 
-        message = recovery_message(item, result)
+        message = recovery_message(
+            item,
+            result,
+        )
 
         delivered = deliver(
             state,
@@ -1995,7 +2394,9 @@ def ath_reclaim_scanner(state):
         if price < ath * 0.995:
             continue
 
-        distance = (price / ath - 1) * 100
+        distance = (
+            (price / ath - 1) * 100
+        )
 
         message = (
             "🟢🚨 ATH RECLAIM ALERT 🚨🟢\n"
@@ -2011,7 +2412,12 @@ def ath_reclaim_scanner(state):
             "⚠️ This does not guarantee a sustained breakout."
         )
 
-        if deliver(state, "ath_reclaim", mint, message):
+        if deliver(
+            state,
+            "ath_reclaim",
+            mint,
+            message,
+        ):
             alerts += 1
 
     return alerts
@@ -2035,6 +2441,7 @@ def find_breakout(candles, history_start):
 
     peak = 0
     peak_time = None
+
     armed = False
     reference_ath = None
     drawdown_low = None
@@ -2087,8 +2494,11 @@ def find_breakout(candles, history_start):
 
 def breakout_scanner(store, state):
     candidates = [
-        x for x in store.values()
-        if history_start_ts(x) and x.get("price")
+        item for item in store.values()
+        if (
+            history_start_ts(item)
+            and item.get("price")
+        )
     ]
 
     if not candidates:
@@ -2120,7 +2530,9 @@ def breakout_scanner(store, state):
 
         history_start = history_start_ts(item)
 
-        age = (now() - history_start) / 86400
+        age = (
+            now() - history_start
+        ) / 86400
 
         if age <= 0 or age > BREAKOUT_MAX_AGE_DAYS:
             continue
@@ -2153,7 +2565,12 @@ def breakout_scanner(store, state):
             "ATH is based on available candle history."
         )
 
-        if deliver(state, "breakout", mint, message):
+        if deliver(
+            state,
+            "breakout",
+            mint,
+            message,
+        ):
             alerts += 1
 
         time.sleep(0.3)
@@ -2186,11 +2603,23 @@ def get_updates(offset):
             timeout=HTTP_TIMEOUT,
         )
 
-        response.raise_for_status()
+        if not response.ok:
+            logging.warning(
+                "Telegram getUpdates HTTP error | status=%s | body=%s",
+                response.status_code,
+                response.text[:500],
+            )
+            return []
+
         payload = response.json()
 
         if payload.get("ok"):
             return payload.get("result", [])
+
+        logging.warning(
+            "Telegram getUpdates rejected: %s",
+            payload.get("description"),
+        )
 
     except Exception as exc:
         logging.warning(
@@ -2240,12 +2669,18 @@ def chart_candles(mint, timeframe):
 
 
 def create_chart(mint, timeframe, symbol):
-    candles = chart_candles(mint, timeframe)
+    candles = chart_candles(
+        mint,
+        timeframe,
+    )
 
     if not candles:
         return None
 
-    CHART_DIR.mkdir(parents=True, exist_ok=True)
+    CHART_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     fig, ax = plt.subplots(
         figsize=(13, 7),
@@ -2255,11 +2690,11 @@ def create_chart(mint, timeframe, symbol):
     dates = [
         mdates.date2num(
             datetime.fromtimestamp(
-                x["time"],
+                candle["time"],
                 timezone.utc,
             )
         )
-        for x in candles
+        for candle in candles
     ]
 
     if timeframe == "4h":
@@ -2294,7 +2729,10 @@ def create_chart(mint, timeframe, symbol):
         height = abs(cl - op)
 
         if height == 0:
-            height = max(op * 0.00001, 1e-12)
+            height = max(
+                op * 0.00001,
+                1e-12,
+            )
 
         ax.add_patch(
             Rectangle(
@@ -2323,9 +2761,20 @@ def create_chart(mint, timeframe, symbol):
         )
     )
 
-    ax.grid(True, alpha=0.18)
-    ax.tick_params(axis="x", rotation=25)
-    ax.margins(x=0.02, y=0.08)
+    ax.grid(
+        True,
+        alpha=0.18,
+    )
+
+    ax.tick_params(
+        axis="x",
+        rotation=25,
+    )
+
+    ax.margins(
+        x=0.02,
+        y=0.08,
+    )
 
     fig.tight_layout()
 
@@ -2335,7 +2784,10 @@ def create_chart(mint, timeframe, symbol):
         mint,
     )
 
-    filename = CHART_DIR / f"{safe}_{timeframe}.png"
+    filename = (
+        CHART_DIR
+        / f"{safe}_{timeframe}.png"
+    )
 
     try:
         fig.savefig(
@@ -2344,7 +2796,9 @@ def create_chart(mint, timeframe, symbol):
         )
 
     except Exception:
-        logging.exception("Chart creation failed")
+        logging.exception(
+            "Chart creation failed"
+        )
         plt.close(fig)
         return None
 
@@ -2354,7 +2808,10 @@ def create_chart(mint, timeframe, symbol):
 
 
 def process_forwarded(state):
-    offset = int(state.get("telegram_update_offset", 0))
+    offset = int(
+        state.get("telegram_update_offset", 0)
+    )
+
     updates = get_updates(offset)
 
     allowed = set(CHAT_IDS)
@@ -2369,7 +2826,9 @@ def process_forwarded(state):
         message = update.get("message") or {}
         chat = message.get("chat") or {}
 
-        chat_id = str(chat.get("id", ""))
+        chat_id = str(
+            chat.get("id", "")
+        )
 
         if (
             chat.get("type") != "private"
@@ -2452,8 +2911,10 @@ def main():
     recovery = load_recovery()
     performance = load_performance()
 
-    # DAILY RESET
-    daily_reset(state, recovery)
+    daily_reset(
+        state,
+        recovery,
+    )
 
     logging.info(
         "%s scan started | UTC day=%s",
@@ -2464,7 +2925,7 @@ def main():
     # 1. Telegram forwarded charts
     process_forwarded(state)
 
-    # 2. Discover tokens from all sources
+    # 2. Discovery sources
     store = {}
 
     source_dexscreener(store)
@@ -2480,12 +2941,12 @@ def main():
     )
 
     logging.info(
-        "Discovered unique tokens: %d | DEXTools accepted: %d",
+        "Discovered unique tokens: %d | DEXTools new tokens: %d",
         len(store),
         dextools_count,
     )
 
-    # 4. Enrich candidate information
+    # 4. Enrich candidates
     enrich(store)
 
     # 5. ATH DROP
@@ -2511,13 +2972,24 @@ def main():
     # 8. ATH RECLAIM
     reclaim_count = ath_reclaim_scanner(state)
 
-    # 9. Performance tracking
+    # 9. Performance
     update_performance(performance)
 
     # 10. Save databases
-    write_json(SEEN_FILE, state)
-    write_json(RECOVERY_FILE, recovery)
-    write_json(PERFORMANCE_FILE, performance)
+    write_json(
+        SEEN_FILE,
+        state,
+    )
+
+    write_json(
+        RECOVERY_FILE,
+        recovery,
+    )
+
+    write_json(
+        PERFORMANCE_FILE,
+        performance,
+    )
 
     logging.info(
         "%s COMPLETE | tokens=%d | DEXTools=%d | "
