@@ -125,7 +125,12 @@
       "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn|98529959"
     ],
     "ath_breakout": [],
-    "ath_reclaim": [],
+    "ath_reclaim": [
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1012061523",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|1507608801",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|6665909136",
+      "B34nXKzCgsJb9ChLuSHPRpXLE3WFSWyeT8Cqkzzmpump|98529959"
+    ],
     "breakout": [],
     "watch": [],
     "recovery": [],
@@ -182,12 +187,9 @@
       "ath": 0.027638948741522167,
       "name": "ni hao cat",
       "symbol": "mihao",
-      "sources": [
-        "GeckoTerminal"
-      ],
-      "url": "https://dexscreener.com/solana/ho1asg6wgh1ffxdehrk2f4ggt1hoxo9s5jclmdqeyebz",
       "created_ts": 1792946595.0,
-      "registered_at": 1795292801.801536
+      "registered_at": 1795292801.801536,
+      "url": "https://dexscreener.com/solana/ho1asg6wgh1ffxdehrk2f4ggt1hoxo9s5jclmdqeyebz"
     },
     "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump": {
       "ath": 0.015119546106163678,
@@ -238,8 +240,8 @@
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
     }
   },
-  "ath_cursor": 8,
-  "breakout_cursor": 15,
+  "ath_cursor": 13,
+  "breakout_cursor": 20,
   "buy_cursor": 0,
   "telegram_update_offset": 435217154
 }
