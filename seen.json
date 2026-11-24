@@ -5,6 +5,10 @@
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1507608801",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|6665909136",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|98529959",
+      "4V77YjprktbfyRg3qFWrdEsxmjGqjjrswzJSjbRypump|1012061523",
+      "4V77YjprktbfyRg3qFWrdEsxmjGqjjrswzJSjbRypump|1507608801",
+      "4V77YjprktbfyRg3qFWrdEsxmjGqjjrswzJSjbRypump|6665909136",
+      "4V77YjprktbfyRg3qFWrdEsxmjGqjjrswzJSjbRypump|98529959",
       "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|1012061523",
       "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|1507608801",
       "7R4MP6VX7n3RMNhL9zsk5Zu5ibZvwq8npUYnRq7epump|6665909136",
@@ -153,10 +157,19 @@
       "pair_created_ts": 1795457380.0,
       "registered_at": 1795533096.2660902,
       "url": "https://dexscreener.com/solana/71rfpnfdq3bpbycqt2jtkawtlwk2xabcuwxoas9s2pft"
+    },
+    "4V77YjprktbfyRg3qFWrdEsxmjGqjjrswzJSjbRypump": {
+      "ath": 4.561041558756106e-05,
+      "name": "Initial Poop Offering",
+      "symbol": "IPO",
+      "created_ts": null,
+      "pair_created_ts": 1795433571.0,
+      "registered_at": 1795533262.9166982,
+      "url": "https://dexscreener.com/solana/7hki8tjzruwrydhew2ucaob5sg78wi1l1ppx1uvujxzw"
     }
   },
-  "ath_cursor": 40,
-  "breakout_cursor": 40,
+  "ath_cursor": 45,
+  "breakout_cursor": 45,
   "buy_cursor": 0,
   "telegram_update_offset": 435217154,
   "daily_reset_date": "2026-11-24",
