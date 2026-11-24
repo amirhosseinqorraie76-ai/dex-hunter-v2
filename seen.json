@@ -42,6 +42,7 @@
       "name": "The Black Bull",
       "symbol": "ANSEM",
       "created_ts": 1781643948.0,
+      "pair_created_ts": 1781643948.0,
       "registered_at": 1795291632.5991828,
       "url": "https://dexscreener.com/solana/fnzky6x7entq1er3d225dqyt7ybfka4pskbmqhb8l3cc"
     },
@@ -168,10 +169,10 @@
       "url": "https://dexscreener.com/solana/7hki8tjzruwrydhew2ucaob5sg78wi1l1ppx1uvujxzw"
     }
   },
-  "ath_cursor": 2,
-  "breakout_cursor": 2,
+  "ath_cursor": 7,
+  "breakout_cursor": 7,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-24",
-  "last_apish_fetch_ts": 1795536402.8171215
+  "last_apish_fetch_ts": 1795542341.1128473
 }
