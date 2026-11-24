@@ -3,14 +3,15 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V17 - DAILY SMART RECOVERY
+DEX HUNTER V18 - LOW CAP DISCOVERY
 
-FEATURES:
+SOURCES:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
 5. VoidScreener
+6. DEXTools via API.SH
 
 SCANNERS:
 - ATH DROP
@@ -22,19 +23,16 @@ SCANNERS:
 - ATH RECLAIM
 - TELEGRAM FORWARDED CHARTS
 
-DAILY RESET:
-- Daily operational memory resets at 00:00 UTC.
-- ATH history is preserved.
-- Performance history is preserved.
-- Tokens can be introduced again on a new UTC day.
-
-IMPORTANT:
-- NO volume filter.
-- NO minimum score for introducing a token.
-- Score is informational only.
-- NO automatic trading.
-
-Run interval: every 5 minutes through GitHub Actions.
+V18:
+- No mandatory market-cap gate.
+- Low-cap and unknown-market-cap tokens are allowed.
+- DEXTools hot-pairs fetched once per hour.
+- Historical ATH window up to 990 days.
+- Historical candle gap tolerance: 7 days.
+- Pair creation time is used as fallback history start.
+- No volume filter.
+- No minimum technical score.
+- No automatic trading.
 """
 
 import os
@@ -59,11 +57,12 @@ from matplotlib.patches import Rectangle
 # CONFIG
 # =========================================================
 
-VERSION = "V17 DAILY SMART RECOVERY"
+VERSION = "V18 LOW CAP DISCOVERY"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 COINGECKO_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
 MORALIS_KEY = os.getenv("MORALIS_API_KEY", "").strip()
+APISH_KEY = os.getenv("APISH_KEY", "").strip()
 
 CHAT_IDS = [
     "6665909136",
@@ -79,16 +78,23 @@ PUMP = "https://frontend-api-v3.pump.fun"
 STONK = "https://www.stonkfun.xyz/api/public/v1"
 VOID = "https://api.voidscreener.com"
 
+APISH_DEXTOOLS = "https://api.api.sh/dextools/v1/hot-pairs"
+
 COINGECKO_ONCHAIN = "https://api.coingecko.com/api/v3/onchain"
 MORALIS = "https://solana-gateway.moralis.io"
 
 HTTP_TIMEOUT = 20
 MAX_SOURCE_ROWS = 100
 
+# Low-cap reference only.
+# This is NOT a filtering threshold.
+LOW_CAP_REFERENCE = 5_000
+
 # ATH DROP
-MIN_MARKET_CAP = 50_000
 MIN_ATH_DROP = 30.0
 ATH_CHECKS_PER_RUN = 5
+ATH_MAX_AGE_DAYS = 990
+ATH_HISTORY_GAP_DAYS = 7
 
 # SMART RECOVERY
 RECOVERY_CHECKS_PER_RUN = 20
@@ -97,6 +103,9 @@ RECOVERY_CHECKS_PER_RUN = 20
 BREAKOUT_CHECKS_PER_RUN = 5
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_MAX_AGE_DAYS = 990
+
+# DEXTools
+APISH_FETCH_INTERVAL = 3600
 
 # Candles
 CANDLE_4H_LIMIT = 100
@@ -123,7 +132,7 @@ ADDRESS_PATTERN = re.compile(
 )
 
 HEADERS = {
-    "User-Agent": "DEX-HUNTER-V17/1.0",
+    "User-Agent": "DEX-HUNTER-V18/1.0",
     "Accept": "application/json",
 }
 
@@ -214,6 +223,20 @@ def dex_url(mint):
     return f"https://dexscreener.com/solana/{mint}"
 
 
+def history_start_ts(item):
+    """
+    Earliest available history start.
+
+    Token creation time is preferred.
+    Pair creation time is only a fallback.
+    Pair creation does not necessarily equal token creation.
+    """
+    return first(
+        item.get("created_ts"),
+        item.get("pair_created_ts"),
+    )
+
+
 def get_json(url, params=None, headers=None):
     try:
         response = session.get(
@@ -244,7 +267,7 @@ def rows_from(payload):
 
     for key in (
         "tokens", "coins", "items", "results",
-        "pools", "data", "pairs"
+        "pools", "data", "pairs", "hot_pairs",
     ):
         value = payload.get(key)
 
@@ -254,7 +277,8 @@ def rows_from(payload):
         if isinstance(value, dict):
             for nested in (
                 "tokens", "coins", "items",
-                "results", "pools", "pairs"
+                "results", "pools", "pairs",
+                "hot_pairs",
             ):
                 inner = value.get(nested)
 
@@ -313,6 +337,7 @@ def empty_seen():
         "ath_cursor": 0,
         "breakout_cursor": 0,
         "daily_reset_date": None,
+        "last_apish_fetch_ts": 0,
     }
 
 
@@ -325,6 +350,7 @@ def load_seen():
     state.setdefault("ath_cursor", 0)
     state.setdefault("breakout_cursor", 0)
     state.setdefault("daily_reset_date", None)
+    state.setdefault("last_apish_fetch_ts", 0)
 
     for key in (
         "ath", "breakout", "watch",
@@ -364,13 +390,13 @@ def load_performance():
 
 def daily_reset(state, recovery):
     """
-    Reset operational memory once per UTC day.
+    Reset daily operational memory.
 
     Preserve:
     - ATH history
     - Telegram update offset
+    - DEXTools hourly fetch timestamp
     - Performance history
-    - Historical price information
 
     Reset:
     - Daily alert memory
@@ -402,8 +428,6 @@ def daily_reset(state, recovery):
     state["ath_cursor"] = 0
     state["breakout_cursor"] = 0
 
-    # Preserve ATH history in state["ath_watch"].
-    # Reset only daily recovery memory.
     recovery["tokens"] = {}
     recovery["cursor"] = 0
 
@@ -521,6 +545,7 @@ def normalize(row, source):
     rels = row.get("relationships") or {}
 
     base = row.get("baseToken") or {}
+    token = row.get("token") or {}
 
     base_id = (
         (rels.get("base_token") or {}).get("data") or {}
@@ -533,6 +558,8 @@ def normalize(row, source):
         row.get("token_address"),
         row.get("contractAddress"),
         row.get("baseTokenAddress"),
+        row.get("tokenAddress"),
+        token.get("address"),
         attrs.get("address"),
         attrs.get("mint"),
         (
@@ -558,11 +585,20 @@ def normalize(row, source):
         attrs.get("pool_created_at"),
     )
 
+    pair_created = first(
+        row.get("pairCreatedAt"),
+        row.get("pair_created_at"),
+        row.get("poolCreatedAt"),
+        attrs.get("pair_created_at"),
+        attrs.get("pool_created_at"),
+    )
+
     return {
         "mint": mint,
         "name": str(first(
             row.get("name"),
             row.get("tokenName"),
+            token.get("name"),
             base.get("name"),
             attrs.get("name"),
             "Unknown",
@@ -570,6 +606,7 @@ def normalize(row, source):
         "symbol": str(first(
             row.get("symbol"),
             row.get("ticker"),
+            token.get("symbol"),
             base.get("symbol"),
             attrs.get("symbol"),
             "???",
@@ -578,6 +615,7 @@ def normalize(row, source):
         "price": number(first(
             row.get("priceUsd"),
             row.get("price_usd"),
+            row.get("price"),
             attrs.get("base_token_price_usd"),
         )),
         "market_cap": number(first(
@@ -585,17 +623,23 @@ def normalize(row, source):
             row.get("market_cap"),
             row.get("usd_market_cap"),
             row.get("marketCapUsd"),
+            row.get("market_cap_usd"),
             attrs.get("market_cap_usd"),
         )),
         "created_ts": timestamp(created),
-        "pair_created_ts": timestamp(first(
-            row.get("pairCreatedAt"),
-            row.get("pair_created_at"),
-            attrs.get("pair_created_at"),
-            attrs.get("pool_created_at"),
-        )),
-        "liquidity": 0.0,
-        "url": first(row.get("url"), attrs.get("url")),
+        "pair_created_ts": timestamp(pair_created),
+        "liquidity": number(first(
+            row.get("liquidityUsd"),
+            row.get("liquidity_usd"),
+            row.get("liquidity"),
+            attrs.get("reserve_in_usd"),
+        )) or 0.0,
+        "url": first(
+            row.get("url"),
+            row.get("pairUrl"),
+            row.get("pair_url"),
+            attrs.get("url"),
+        ),
     }
 
 
@@ -626,6 +670,11 @@ def add_candidate(store, candidate):
         ):
             if candidate.get(key) is not None:
                 old[key] = candidate[key]
+
+    old["liquidity"] = max(
+        number(old.get("liquidity")) or 0,
+        number(candidate.get("liquidity")) or 0,
+    )
 
 
 # =========================================================
@@ -747,6 +796,136 @@ def source_void(store):
 
 
 # =========================================================
+# DEXTOOLS VIA API.SH
+# =========================================================
+
+def source_dextools(store, state):
+    """
+    Fetch DEXTools hot pairs through API.SH.
+
+    Fetch interval: 1 hour.
+    APISH_KEY must be stored in GitHub Actions Secrets.
+    """
+
+    if not APISH_KEY:
+        logging.warning(
+            "DEXTools skipped: APISH_KEY secret is missing."
+        )
+        return 0
+
+    last_fetch = number(
+        state.get("last_apish_fetch_ts")
+    ) or 0
+
+    elapsed = now() - last_fetch
+
+    if elapsed < APISH_FETCH_INTERVAL:
+        logging.info(
+            "DEXTools skipped: next fetch in %.0f seconds.",
+            APISH_FETCH_INTERVAL - elapsed,
+        )
+        return 0
+
+    logging.info("Fetching DEXTools hot pairs...")
+
+    payload = get_json(
+        APISH_DEXTOOLS,
+        params={"chain": "solana"},
+        headers={
+            "x-api-key": APISH_KEY,
+            "accept": "application/json",
+        },
+    )
+
+    if payload is None:
+        logging.warning(
+            "DEXTools request failed. Fetch timestamp unchanged."
+        )
+        return 0
+
+    rows = rows_from(payload)
+    added = 0
+
+    for row in rows[:MAX_SOURCE_ROWS]:
+        candidate = normalize(row, "DEXTools")
+
+        if not candidate:
+            # Try common nested token structures.
+            token = row.get("token") or {}
+            base = row.get("baseToken") or {}
+
+            mint = first(
+                row.get("token_address"),
+                row.get("tokenAddress"),
+                row.get("address"),
+                row.get("baseTokenAddress"),
+                token.get("address"),
+                base.get("address"),
+            )
+
+            if not valid_mint(mint):
+                continue
+
+            candidate = normalize(
+                {
+                    "mint": mint,
+                    "name": first(
+                        row.get("name"),
+                        token.get("name"),
+                        base.get("name"),
+                    ),
+                    "symbol": first(
+                        row.get("symbol"),
+                        token.get("symbol"),
+                        base.get("symbol"),
+                    ),
+                    "price_usd": first(
+                        row.get("price_usd"),
+                        row.get("priceUsd"),
+                    ),
+                    "market_cap_usd": first(
+                        row.get("market_cap_usd"),
+                        row.get("marketCap"),
+                        row.get("fdv"),
+                    ),
+                    "created_at": first(
+                        row.get("created_at"),
+                        row.get("createdAt"),
+                    ),
+                    "pair_created_at": first(
+                        row.get("pair_created_at"),
+                        row.get("pairCreatedAt"),
+                    ),
+                    "liquidity_usd": first(
+                        row.get("liquidity_usd"),
+                        row.get("liquidityUsd"),
+                    ),
+                    "url": first(
+                        row.get("url"),
+                        row.get("pair_url"),
+                    ),
+                },
+                "DEXTools",
+            )
+
+        if candidate:
+            add_candidate(store, candidate)
+            added += 1
+
+    # Update only after a successful JSON response.
+    state["last_apish_fetch_ts"] = now()
+    write_json(SEEN_FILE, state)
+
+    logging.info(
+        "DEXTools successful response | rows=%d | accepted=%d",
+        len(rows),
+        added,
+    )
+
+    return added
+
+
+# =========================================================
 # DEXSCREENER ENRICHMENT
 # =========================================================
 
@@ -784,6 +963,7 @@ def enrich(store):
 
             if liquidity >= item.get("liquidity", 0):
                 item["liquidity"] = liquidity
+
                 item["price"] = (
                     number(pair.get("priceUsd"))
                     or item.get("price")
@@ -1116,13 +1296,16 @@ def get_1d(mint):
 # ATH ENGINE
 # =========================================================
 
-def observed_ath(mint, created_ts):
-    if not created_ts:
+def observed_ath(mint, history_start):
+    if not history_start:
         return None
 
-    age = (now() - created_ts) / 86400
+    age = (now() - history_start) / 86400
 
-    if age > 175:
+    if age > ATH_MAX_AGE_DAYS:
+        return None
+
+    if age < 0:
         return None
 
     candles = get_1d(mint)
@@ -1130,7 +1313,9 @@ def observed_ath(mint, created_ts):
     if not candles:
         return None
 
-    if candles[0]["time"] > created_ts + 36 * 3600:
+    if candles[0]["time"] > (
+        history_start + ATH_HISTORY_GAP_DAYS * 86400
+    ):
         return None
 
     return max(x["high"] for x in candles)
@@ -1140,14 +1325,17 @@ def ath_drop_filter(store, state):
     candidates = [
         item for item in store.values()
         if (
-            (item.get("market_cap") or 0) >= MIN_MARKET_CAP
-            and (item.get("price") or 0) > 0
-            and item.get("created_ts")
+            (item.get("price") or 0) > 0
+            and history_start_ts(item)
         )
     ]
 
     candidates.sort(
-        key=lambda x: x.get("market_cap") or 0,
+        key=lambda x: (
+            number(x.get("market_cap"))
+            if number(x.get("market_cap")) is not None
+            else -1
+        ),
         reverse=True,
     )
 
@@ -1168,11 +1356,9 @@ def ath_drop_filter(store, state):
 
     for item in batch:
         mint = item["mint"]
+        history_start = history_start_ts(item)
 
-        ath = observed_ath(
-            mint,
-            item.get("created_ts"),
-        )
+        ath = observed_ath(mint, history_start)
 
         price = item.get("price") or 0
 
@@ -1192,24 +1378,34 @@ def ath_drop_filter(store, state):
             "ath": stored_ath,
             "name": item["name"],
             "symbol": item["symbol"],
-            "created_ts": item["created_ts"],
+            "created_ts": item.get("created_ts"),
+            "pair_created_ts": item.get("pair_created_ts"),
             "registered_at": previous.get("registered_at") or now(),
             "url": item.get("url") or dex_url(mint),
         }
 
+        market_cap = number(item.get("market_cap"))
+        market_cap_text = (
+            f"${market_cap:,.0f}"
+            if market_cap is not None
+            else "Unknown"
+        )
+
         message = (
-            "🎯 ATH DROP DETECTED | DEX HUNTER V17\n"
+            "🎯 ATH DROP DETECTED | DEX HUNTER V18\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 {item['name']} ({item['symbol']})\n"
             f"💰 Price: ${price:.10g}\n"
-            f"🏔 ATH: ${stored_ath:.10g}\n"
+            f"🏔 Observed ATH: ${stored_ath:.10g}\n"
             f"📉 Drop: {drop:.2f}%\n"
-            f"📊 Market Cap: ${(item.get('market_cap') or 0):,.0f}\n"
+            f"📊 Market Cap: {market_cap_text}\n"
             f"💧 Liquidity: ${(item.get('liquidity') or 0):,.0f}\n"
+            f"🔎 Sources: {', '.join(item.get('sources', []))}\n"
             f"🧾 Contract:\n{mint}\n"
             f"🔗 {item.get('url') or dex_url(mint)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "👁 Token registered for recovery monitoring.\n"
+            "ℹ️ ATH is based on available candle history, not guaranteed lifetime ATH.\n"
             "⚠️ Analytical alert only."
         )
 
@@ -1296,9 +1492,8 @@ def analyze_recovery(item, candles):
     Resistance breakout: 15
     Liquidity: 10
 
-    IMPORTANT:
     Score is informational only.
-    There is NO minimum score for introducing a token.
+    No minimum score blocks introduction.
     """
 
     if len(candles) < 12:
@@ -1319,8 +1514,6 @@ def analyze_recovery(item, candles):
     score = 0
     details = {}
 
-    # 1. ATH DISTANCE: 15 POINTS
-
     if 30 <= drop <= 90:
         distance_score = 15
     elif 20 <= drop < 30:
@@ -1332,8 +1525,6 @@ def analyze_recovery(item, candles):
 
     score += distance_score
     details["ath_distance"] = distance_score
-
-    # 2. BOTTOM FORMATION: 20 POINTS
 
     recent = candles[-6:]
     previous = candles[-12:-6]
@@ -1370,8 +1561,6 @@ def analyze_recovery(item, candles):
     score += bottom_score
     details["bottom"] = bottom_score
 
-    # 3. STRUCTURE CHANGE: 20 POINTS
-
     last = candles[-1]
     old = candles[-7:-1]
 
@@ -1392,8 +1581,6 @@ def analyze_recovery(item, candles):
     score += structure_score
     details["structure"] = structure_score
 
-    # 4. RESISTANCE BREAKOUT: 15 POINTS
-
     resistance = max(
         x["high"] for x in candles[-13:-1]
     )
@@ -1407,8 +1594,6 @@ def analyze_recovery(item, candles):
 
     score += breakout_score
     details["breakout"] = breakout_score
-
-    # 5. LIQUIDITY: 10 POINTS
 
     liquidity = number(item.get("liquidity"))
 
@@ -1427,30 +1612,19 @@ def analyze_recovery(item, candles):
     score += liquidity_score
     details["liquidity"] = liquidity_score
 
-    # PHASE CLASSIFICATION
-    # This is based on price structure, not minimum score.
-
     if last["close"] > resistance:
         phase = "CONFIRMED REVERSAL"
-
     elif structure_score >= 12:
         phase = "RECOVERY"
-
     elif bottom_score >= 10:
         phase = "BOTTOM FORMING"
-
     else:
         phase = "FALLING / NO CONFIRMATION"
 
-    # ALERT CLASSIFICATION
-    # No score threshold blocks introduction.
-
     if phase == "CONFIRMED REVERSAL":
         stage = "STRONG BUY"
-
     elif phase == "RECOVERY":
         stage = "RECOVERY"
-
     else:
         stage = "WATCH"
 
@@ -1494,6 +1668,13 @@ def recovery_message(item, result):
         else "نامشخص"
     )
 
+    market_cap = number(item.get("market_cap"))
+    market_cap_text = (
+        f"${market_cap:,.0f}"
+        if market_cap is not None
+        else "نامشخص"
+    )
+
     return (
         f"{heading}\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1502,8 +1683,9 @@ def recovery_message(item, result):
         f"📍 Phase: {result['phase']}\n"
         f"📊 Score: {result['score']}/80\n"
         f"💰 Price: ${result['price']:.10g}\n"
-        f"🏔 ATH: ${result['ath']:.10g}\n"
+        f"🏔 Observed ATH: ${result['ath']:.10g}\n"
         f"📉 Drop from ATH: {result['drop']:.2f}%\n"
+        f"📊 Market Cap: {market_cap_text}\n"
         f"💧 Liquidity: {liquidity_text}\n"
         f"🧱 Resistance: ${result['resistance']:.10g}\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1515,12 +1697,13 @@ def recovery_message(item, result):
         f"Liquidity: {details['liquidity']}/10\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📌 وضعیت: {urgency}\n"
+        f"🔎 Sources: {', '.join(item.get('sources', []))}\n"
         f"🧾 Contract:\n{item['mint']}\n"
         f"🔗 Chart: {item.get('url') or dex_url(item['mint'])}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚠️ هیچ حداقل امتیازی برای معرفی ارز وجود ندارد.\n"
-        "⚠️ امتیاز فقط برای ارزیابی کیفیت فرصت است.\n"
-        "⚠️ امنیت قرارداد و تعداد هولدرها در این نسخه بررسی نشده‌اند.\n"
+        "⚠️ Market Cap نامشخص مانع بررسی نیست.\n"
+        "⚠️ امنیت قرارداد و تعداد هولدرها بررسی نشده‌اند.\n"
         "⚠️ این هشدار توصیه قطعی خرید نیست."
     )
 
@@ -1637,6 +1820,9 @@ def recovery_scanner(store, state, recovery, performance):
                 "liquidity": None,
                 "url": info.get("url") or dex_url(mint),
                 "ath": info.get("ath"),
+                "sources": [],
+                "created_ts": info.get("created_ts"),
+                "pair_created_ts": info.get("pair_created_ts"),
             }
 
             live = live_token(mint)
@@ -1651,13 +1837,12 @@ def recovery_scanner(store, state, recovery, performance):
             candidates.append(item)
             existing.add(mint)
 
-    # New candidates are also examined independently.
-    # No score filter and no volume filter.
+    # New candidates.
+    # No market-cap gate, no volume gate, no score gate.
 
     for item in store.values():
         if (
             item["mint"] not in existing
-            and (item.get("market_cap") or 0) >= MIN_MARKET_CAP
             and (item.get("price") or 0) > 0
         ):
             candidates.append(item)
@@ -1733,9 +1918,6 @@ def recovery_scanner(store, state, recovery, performance):
         }
 
         previous_stage = entry.get("highest_stage")
-
-        # A lower alert is not sent after a higher stage
-        # has already been reached during the same day.
 
         if (
             previous_stage
@@ -1839,13 +2021,15 @@ def ath_reclaim_scanner(state):
 # ATH BREAKOUT AFTER 75% DROP
 # =========================================================
 
-def find_breakout(candles, created_ts):
+def find_breakout(candles, history_start):
     if len(candles) < 10:
         return None
 
     if (
-        created_ts
-        and candles[0]["time"] > created_ts + 36 * 3600
+        history_start
+        and candles[0]["time"] > (
+            history_start + ATH_HISTORY_GAP_DAYS * 86400
+        )
     ):
         return None
 
@@ -1904,7 +2088,7 @@ def find_breakout(candles, created_ts):
 def breakout_scanner(store, state):
     candidates = [
         x for x in store.values()
-        if x.get("created_ts") and x.get("price")
+        if history_start_ts(x) and x.get("price")
     ]
 
     if not candidates:
@@ -1934,7 +2118,9 @@ def breakout_scanner(store, state):
         ):
             continue
 
-        age = (now() - item["created_ts"]) / 86400
+        history_start = history_start_ts(item)
+
+        age = (now() - history_start) / 86400
 
         if age <= 0 or age > BREAKOUT_MAX_AGE_DAYS:
             continue
@@ -1943,7 +2129,7 @@ def breakout_scanner(store, state):
 
         result = find_breakout(
             candles,
-            item["created_ts"],
+            history_start,
         )
 
         if not result:
@@ -1956,14 +2142,15 @@ def breakout_scanner(store, state):
             "🚀 ATH BREAKOUT AFTER 75% DROP\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"🪙 {item['name']} ({item['symbol']})\n"
-            f"🏔 Previous ATH: ${result['ath']:.10g}\n"
+            f"🏔 Previous observed ATH: ${result['ath']:.10g}\n"
             f"📉 Drawdown low: ${result['low']:.10g}\n"
             f"💥 Breakout close: ${result['breakout']:.10g}\n"
             f"💰 Current price: ${item['price']:.10g}\n"
             f"🧾 Contract:\n{mint}\n"
             f"🔗 {item.get('url') or dex_url(mint)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "Confirmation requires a daily candle close above ATH."
+            "Confirmation requires a daily candle close above ATH.\n"
+            "ATH is based on available candle history."
         )
 
         if deliver(state, "breakout", mint, message):
@@ -2286,22 +2473,28 @@ def main():
     source_stonk(store)
     source_void(store)
 
-    logging.info(
-        "Discovered unique tokens: %d",
-        len(store),
+    # 3. DEXTools hourly discovery
+    dextools_count = source_dextools(
+        store,
+        state,
     )
 
-    # 3. Enrich candidate information
+    logging.info(
+        "Discovered unique tokens: %d | DEXTools accepted: %d",
+        len(store),
+        dextools_count,
+    )
+
+    # 4. Enrich candidate information
     enrich(store)
 
-    # 4. Filter one: ATH DROP
+    # 5. ATH DROP
     ath_count = ath_drop_filter(
         store,
         state,
     )
 
-    # 5. Filter two: SMART RECOVERY
-    # No minimum score blocks a token.
+    # 6. SMART RECOVERY
     recovery_count = recovery_scanner(
         store,
         state,
@@ -2309,29 +2502,30 @@ def main():
         performance,
     )
 
-    # 6. ATH BREAKOUT
+    # 7. ATH BREAKOUT
     breakout_count = breakout_scanner(
         store,
         state,
     )
 
-    # 7. ATH RECLAIM
+    # 8. ATH RECLAIM
     reclaim_count = ath_reclaim_scanner(state)
 
-    # 8. Performance tracking
+    # 9. Performance tracking
     update_performance(performance)
 
-    # 9. Save databases
+    # 10. Save databases
     write_json(SEEN_FILE, state)
     write_json(RECOVERY_FILE, recovery)
     write_json(PERFORMANCE_FILE, performance)
 
     logging.info(
-        "%s COMPLETE | tokens=%d | ATH=%d | "
-        "RECOVERY=%d | BREAKOUT=%d | RECLAIM=%d | "
-        "tracked=%d | performance=%d",
+        "%s COMPLETE | tokens=%d | DEXTools=%d | "
+        "ATH=%d | RECOVERY=%d | BREAKOUT=%d | "
+        "RECLAIM=%d | tracked=%d | performance=%d",
         VERSION,
         len(store),
+        dextools_count,
         ath_count,
         recovery_count,
         breakout_count,
