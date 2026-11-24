@@ -3,32 +3,38 @@
 # -*- coding: utf-8 -*-
 
 """
-DEX HUNTER V17 - SMART RECOVERY
+DEX HUNTER V17 - DAILY SMART RECOVERY
 
-Five discovery sources:
+FEATURES:
 1. DexScreener
 2. GeckoTerminal
 3. Pump.fun
 4. Stonk.fun
-5. VoidScreener (optional)
+5. VoidScreener
 
-Main engine:
+SCANNERS:
 - ATH DROP
 - SMART RECOVERY
 - BOTTOM FORMING
 - RECOVERY
 - CONFIRMED REVERSAL
 - ATH BREAKOUT
-- FORWARDED TELEGRAM CHARTS
+- ATH RECLAIM
+- TELEGRAM FORWARDED CHARTS
 
-No volume filter.
-No automatic trading.
-Scan interval: GitHub Actions every 5 minutes.
+DAILY RESET:
+- Daily operational memory resets at 00:00 UTC.
+- ATH history is preserved.
+- Performance history is preserved.
+- Tokens can be introduced again on a new UTC day.
 
-State files:
-- seen.json
-- recovery.json
-- performance.json
+IMPORTANT:
+- NO volume filter.
+- NO minimum score for introducing a token.
+- Score is informational only.
+- NO automatic trading.
+
+Run interval: every 5 minutes through GitHub Actions.
 """
 
 import os
@@ -53,7 +59,7 @@ from matplotlib.patches import Rectangle
 # CONFIG
 # =========================================================
 
-VERSION = "V17 SMART RECOVERY"
+VERSION = "V17 DAILY SMART RECOVERY"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 COINGECKO_KEY = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
@@ -79,29 +85,27 @@ MORALIS = "https://solana-gateway.moralis.io"
 HTTP_TIMEOUT = 20
 MAX_SOURCE_ROWS = 100
 
+# ATH DROP
 MIN_MARKET_CAP = 50_000
 MIN_ATH_DROP = 30.0
-
-# Recovery scan
-RECOVERY_CHECKS_PER_RUN = 20
-RECOVERY_MIN_SCORE = 50
-
-# ATH scan
 ATH_CHECKS_PER_RUN = 5
 
-# Breakout scan
+# SMART RECOVERY
+RECOVERY_CHECKS_PER_RUN = 20
+
+# ATH BREAKOUT
 BREAKOUT_CHECKS_PER_RUN = 5
 BREAKOUT_DROP_PERCENT = 75.0
 BREAKOUT_MAX_AGE_DAYS = 990
 
-# Candle limits
+# Candles
 CANDLE_4H_LIMIT = 100
 CANDLE_1D_LIMIT = 1000
 
 # Telegram
 TELEGRAM_UPDATES_LIMIT = 30
 
-# Duplicate protection
+# Alert cooldowns
 WATCH_COOLDOWN = 12 * 3600
 RECOVERY_COOLDOWN = 12 * 3600
 STRONG_COOLDOWN = 24 * 3600
@@ -138,6 +142,10 @@ logging.basicConfig(
 
 def now():
     return time.time()
+
+
+def utc_day():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def number(value):
@@ -290,12 +298,9 @@ def write_json(path, data):
     temp.replace(path)
 
 
-def load_seen():
-    state = read_json(SEEN_FILE, {})
-
-    state.setdefault(
-        "sent",
-        {
+def empty_seen():
+    return {
+        "sent": {
             "ath": [],
             "breakout": [],
             "watch": [],
@@ -303,12 +308,23 @@ def load_seen():
             "strong": [],
             "ath_reclaim": [],
         },
-    )
+        "ath_watch": {},
+        "telegram_update_offset": 0,
+        "ath_cursor": 0,
+        "breakout_cursor": 0,
+        "daily_reset_date": None,
+    }
 
+
+def load_seen():
+    state = read_json(SEEN_FILE, empty_seen())
+
+    state.setdefault("sent", {})
     state.setdefault("ath_watch", {})
     state.setdefault("telegram_update_offset", 0)
     state.setdefault("ath_cursor", 0)
     state.setdefault("breakout_cursor", 0)
+    state.setdefault("daily_reset_date", None)
 
     for key in (
         "ath", "breakout", "watch",
@@ -343,6 +359,65 @@ def load_performance():
 
 
 # =========================================================
+# DAILY RESET
+# =========================================================
+
+def daily_reset(state, recovery):
+    """
+    Reset operational memory once per UTC day.
+
+    Preserve:
+    - ATH history
+    - Telegram update offset
+    - Performance history
+    - Historical price information
+
+    Reset:
+    - Daily alert memory
+    - Daily recovery tracking
+    - Daily scan cursors
+    """
+
+    today = utc_day()
+    previous = state.get("daily_reset_date")
+
+    if previous == today:
+        return False
+
+    logging.info(
+        "DAILY RESET: %s -> %s",
+        previous,
+        today,
+    )
+
+    state["sent"] = {
+        "ath": [],
+        "breakout": [],
+        "watch": [],
+        "recovery": [],
+        "strong": [],
+        "ath_reclaim": [],
+    }
+
+    state["ath_cursor"] = 0
+    state["breakout_cursor"] = 0
+
+    # Preserve ATH history in state["ath_watch"].
+    # Reset only daily recovery memory.
+    recovery["tokens"] = {}
+    recovery["cursor"] = 0
+
+    state["daily_reset_date"] = today
+
+    write_json(SEEN_FILE, state)
+    write_json(RECOVERY_FILE, recovery)
+
+    logging.info("Daily memory successfully reset.")
+
+    return True
+
+
+# =========================================================
 # TELEGRAM
 # =========================================================
 
@@ -369,7 +444,11 @@ def telegram_request(method, **kwargs):
             return result.get("result")
 
     except Exception as exc:
-        logging.warning("Telegram %s failed: %s", method, exc)
+        logging.warning(
+            "Telegram %s failed: %s",
+            method,
+            exc,
+        )
 
     return None
 
@@ -413,6 +492,7 @@ def send_photo(chat_id, filename):
 
 def deliver(state, category, mint, message):
     sent = set(state["sent"][category])
+    successful = False
 
     for chat_id in CHAT_IDS:
         key = f"{mint}|{chat_id}"
@@ -422,10 +502,14 @@ def deliver(state, category, mint, message):
 
         if send_message(chat_id, message):
             sent.add(key)
+            successful = True
+
             state["sent"][category] = sorted(sent)
             write_json(SEEN_FILE, state)
 
         time.sleep(0.12)
+
+    return successful
 
 
 # =========================================================
@@ -537,9 +621,8 @@ def add_candidate(store, candidate):
         "market_cap", "created_ts",
         "pair_created_ts", "url",
     ):
-        if (
-            old.get(key) is None
-            or old.get(key) in ("Unknown", "???")
+        if old.get(key) is None or old.get(key) in (
+            "Unknown", "???"
         ):
             if candidate.get(key) is not None:
                 old[key] = candidate[key]
@@ -701,7 +784,11 @@ def enrich(store):
 
             if liquidity >= item.get("liquidity", 0):
                 item["liquidity"] = liquidity
-                item["price"] = number(pair.get("priceUsd")) or item.get("price")
+                item["price"] = (
+                    number(pair.get("priceUsd"))
+                    or item.get("price")
+                )
+
                 item["market_cap"] = (
                     number(pair.get("marketCap"))
                     or number(pair.get("fdv"))
@@ -731,8 +818,10 @@ def extract_ohlcv(payload):
 
     try:
         rows = payload["data"]["attributes"]["ohlcv_list"]
+
         if isinstance(rows, list):
             return rows
+
     except Exception:
         pass
 
@@ -743,7 +832,10 @@ def extract_ohlcv(payload):
             return value
 
         if isinstance(value, dict):
-            for inner in ("result", "data", "ohlcv", "candles", "items"):
+            for inner in (
+                "result", "data", "ohlcv",
+                "candles", "items"
+            ):
                 if isinstance(value.get(inner), list):
                     return value[inner]
 
@@ -777,7 +869,8 @@ def normalize_candles(raw):
         op, hi, lo, cl = map(number, (op, hi, lo, cl))
 
         if ts is None or any(
-            x is None or x <= 0 for x in (op, hi, lo, cl)
+            x is None or x <= 0
+            for x in (op, hi, lo, cl)
         ):
             continue
 
@@ -791,7 +884,6 @@ def normalize_candles(raw):
 
     output.sort(key=lambda x: x["time"])
 
-    # Remove duplicate timestamps.
     unique = {}
 
     for candle in output:
@@ -891,11 +983,9 @@ def moralis_pairs(mint):
         },
     )
 
-    rows = rows_from(payload)
-
     pairs = []
 
-    for row in rows:
+    for row in rows_from(payload):
         address = first(
             row.get("pairAddress"),
             row.get("pair_address"),
@@ -996,7 +1086,10 @@ def get_candles(mint, timeframe="hour", aggregate=4, limit=100):
                 return candles
 
         except Exception:
-            logging.exception("Candle provider failed: %s", provider)
+            logging.exception(
+                "Candle provider failed: %s",
+                provider,
+            )
 
     return []
 
@@ -1093,7 +1186,6 @@ def ath_drop_filter(store, state):
 
         previous = state["ath_watch"].get(mint, {})
         old_ath = number(previous.get("ath")) or 0
-
         stored_ath = max(ath, old_ath)
 
         state["ath_watch"][mint] = {
@@ -1125,8 +1217,8 @@ def ath_drop_filter(store, state):
             f"{mint}|{chat}" in state["sent"]["ath"]
             for chat in CHAT_IDS
         ):
-            deliver(state, "ath", mint, message)
-            matches += 1
+            if deliver(state, "ath", mint, message):
+                matches += 1
 
         time.sleep(0.4)
 
@@ -1196,7 +1288,7 @@ def live_token(mint):
 
 def analyze_recovery(item, candles):
     """
-    Technical score: maximum 80 points.
+    Maximum technical score: 80.
 
     ATH distance: 15
     Bottom formation: 20
@@ -1204,8 +1296,9 @@ def analyze_recovery(item, candles):
     Resistance breakout: 15
     Liquidity: 10
 
-    Contract safety and holder data are not available here.
-    They receive no fabricated points.
+    IMPORTANT:
+    Score is informational only.
+    There is NO minimum score for introducing a token.
     """
 
     if len(candles) < 12:
@@ -1213,11 +1306,10 @@ def analyze_recovery(item, candles):
 
     price = item.get("price") or candles[-1]["close"]
 
-    if price <= 0:
+    if not price or price <= 0:
         return None
 
-    watch = item.get("ath")
-    ath = number(watch)
+    ath = number(item.get("ath"))
 
     if not ath or ath <= 0:
         ath = max(x["high"] for x in candles)
@@ -1227,9 +1319,7 @@ def analyze_recovery(item, candles):
     score = 0
     details = {}
 
-    # -----------------------------------------------------
-    # 1. DISTANCE FROM ATH: 15 POINTS
-    # -----------------------------------------------------
+    # 1. ATH DISTANCE: 15 POINTS
 
     if 30 <= drop <= 90:
         distance_score = 15
@@ -1243,9 +1333,7 @@ def analyze_recovery(item, candles):
     score += distance_score
     details["ath_distance"] = distance_score
 
-    # -----------------------------------------------------
     # 2. BOTTOM FORMATION: 20 POINTS
-    # -----------------------------------------------------
 
     recent = candles[-6:]
     previous = candles[-12:-6]
@@ -1259,10 +1347,13 @@ def analyze_recovery(item, candles):
         candles[-1]["low"] > candles[-4]["low"]
     )
 
+    recent_mid = (
+        max(x["high"] for x in recent)
+        + min(x["low"] for x in recent)
+    ) / 2
+
     close_above_recent_mid = (
-        candles[-1]["close"]
-        >= (max(x["high"] for x in recent)
-            + min(x["low"] for x in recent)) / 2
+        candles[-1]["close"] >= recent_mid
     )
 
     bottom_score = 0
@@ -1279,9 +1370,7 @@ def analyze_recovery(item, candles):
     score += bottom_score
     details["bottom"] = bottom_score
 
-    # -----------------------------------------------------
     # 3. STRUCTURE CHANGE: 20 POINTS
-    # -----------------------------------------------------
 
     last = candles[-1]
     old = candles[-7:-1]
@@ -1303,9 +1392,7 @@ def analyze_recovery(item, candles):
     score += structure_score
     details["structure"] = structure_score
 
-    # -----------------------------------------------------
     # 4. RESISTANCE BREAKOUT: 15 POINTS
-    # -----------------------------------------------------
 
     resistance = max(
         x["high"] for x in candles[-13:-1]
@@ -1321,45 +1408,51 @@ def analyze_recovery(item, candles):
     score += breakout_score
     details["breakout"] = breakout_score
 
-    # -----------------------------------------------------
     # 5. LIQUIDITY: 10 POINTS
-    # -----------------------------------------------------
 
-    liquidity = number(item.get("liquidity")) or 0
+    liquidity = number(item.get("liquidity"))
 
-    if liquidity >= 100_000:
-        liquidity_score = 10
-    elif liquidity >= 50_000:
-        liquidity_score = 8
-    elif liquidity >= 20_000:
-        liquidity_score = 6
-    elif liquidity >= 5_000:
-        liquidity_score = 3
-    else:
-        liquidity_score = 0
+    liquidity_score = 0
+
+    if liquidity is not None:
+        if liquidity >= 100_000:
+            liquidity_score = 10
+        elif liquidity >= 50_000:
+            liquidity_score = 8
+        elif liquidity >= 20_000:
+            liquidity_score = 6
+        elif liquidity >= 5_000:
+            liquidity_score = 3
 
     score += liquidity_score
     details["liquidity"] = liquidity_score
 
-    # -----------------------------------------------------
-    # CLASSIFICATION
-    # -----------------------------------------------------
+    # PHASE CLASSIFICATION
+    # This is based on price structure, not minimum score.
 
-    if score >= 76 and breakout_score >= 15 and bottom_score >= 10:
-        stage = "STRONG BUY"
+    if last["close"] > resistance:
         phase = "CONFIRMED REVERSAL"
 
-    elif score >= 65 and structure_score >= 12:
-        stage = "RECOVERY"
+    elif structure_score >= 12:
         phase = "RECOVERY"
 
-    elif score >= 50 and bottom_score >= 10:
-        stage = "WATCH"
+    elif bottom_score >= 10:
         phase = "BOTTOM FORMING"
 
     else:
-        stage = "NONE"
-        phase = "FALLING"
+        phase = "FALLING / NO CONFIRMATION"
+
+    # ALERT CLASSIFICATION
+    # No score threshold blocks introduction.
+
+    if phase == "CONFIRMED REVERSAL":
+        stage = "STRONG BUY"
+
+    elif phase == "RECOVERY":
+        stage = "RECOVERY"
+
+    else:
+        stage = "WATCH"
 
     return {
         "score": score,
@@ -1385,13 +1478,21 @@ def recovery_message(item, result):
 
     if result["stage"] == "STRONG BUY":
         heading = "🟢🚨 STRONG BUY SIGNAL 🚨🟢"
-        urgency = "بازگشت قدرتمند با شکست مقاومت تأیید شده"
+        urgency = "قیمت مقاومت اخیر را با کندل بسته‌شده شکسته است."
+
     elif result["stage"] == "RECOVERY":
         heading = "🟢 RECOVERY SIGNAL"
-        urgency = "نشانه‌های شروع بازگشت مشاهده شده"
+        urgency = "نشانه‌های تغییر ساختار و شروع بازگشت مشاهده شده است."
+
     else:
         heading = "👁 WATCH ALERT"
-        urgency = "احتمال تشکیل کف؛ نیازمند تأیید بیشتر"
+        urgency = "ارز شناسایی شده؛ هنوز بازگشت آن تأیید نشده است."
+
+    liquidity_text = (
+        f"${result['liquidity']:,.0f}"
+        if result["liquidity"] is not None
+        else "نامشخص"
+    )
 
     return (
         f"{heading}\n"
@@ -1403,7 +1504,7 @@ def recovery_message(item, result):
         f"💰 Price: ${result['price']:.10g}\n"
         f"🏔 ATH: ${result['ath']:.10g}\n"
         f"📉 Drop from ATH: {result['drop']:.2f}%\n"
-        f"💧 Liquidity: ${result['liquidity']:,.0f}\n"
+        f"💧 Liquidity: {liquidity_text}\n"
         f"🧱 Resistance: ${result['resistance']:.10g}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "📋 TECHNICAL SCORE\n"
@@ -1417,8 +1518,9 @@ def recovery_message(item, result):
         f"🧾 Contract:\n{item['mint']}\n"
         f"🔗 Chart: {item.get('url') or dex_url(item['mint'])}\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ امتیاز فقط بر اساس داده‌های تکنیکال قابل دسترس است.\n"
-        "⚠️ امنیت قرارداد و هولدرها در این امتیاز بررسی نشده‌اند.\n"
+        "⚠️ هیچ حداقل امتیازی برای معرفی ارز وجود ندارد.\n"
+        "⚠️ امتیاز فقط برای ارزیابی کیفیت فرصت است.\n"
+        "⚠️ امنیت قرارداد و تعداد هولدرها در این نسخه بررسی نشده‌اند.\n"
         "⚠️ این هشدار توصیه قطعی خرید نیست."
     )
 
@@ -1430,11 +1532,11 @@ def recovery_message(item, result):
 def record_signal(performance, mint, item, result):
     signals = performance["signals"]
 
-    # One performance record per token and signal stage.
     for signal in signals:
         if (
             signal.get("mint") == mint
             and signal.get("stage") == result["stage"]
+            and signal.get("day") == utc_day()
         ):
             return
 
@@ -1446,12 +1548,12 @@ def record_signal(performance, mint, item, result):
         "score": result["score"],
         "entry_price": result["price"],
         "entry_time": now(),
+        "day": utc_day(),
         "max_price": result["price"],
         "min_price": result["price"],
         "snapshots": {},
     })
 
-    # Keep the database bounded.
     performance["signals"] = signals[-2000:]
 
 
@@ -1460,6 +1562,30 @@ def update_performance(performance):
         mint = signal.get("mint")
 
         if not mint:
+            continue
+
+        entry = number(signal.get("entry_price"))
+
+        if not entry or entry <= 0:
+            continue
+
+        elapsed = (
+            now() - signal.get("entry_time", now())
+        ) / 3600
+
+        due = [
+            (label, hours)
+            for label, hours in (
+                ("1h", 1),
+                ("6h", 6),
+                ("24h", 24),
+                ("7d", 168),
+            )
+            if elapsed >= hours
+            and label not in signal.get("snapshots", {})
+        ]
+
+        if not due:
             continue
 
         live = live_token(mint)
@@ -1479,25 +1605,13 @@ def update_performance(performance):
             price,
         )
 
-        elapsed = (now() - signal.get("entry_time", now())) / 3600
-
-        entry = number(signal.get("entry_price"))
-
-        if not entry or entry <= 0:
-            continue
-
-        for label, hours in (
-            ("1h", 1),
-            ("6h", 6),
-            ("24h", 24),
-            ("7d", 168),
-        ):
-            if elapsed >= hours and label not in signal["snapshots"]:
-                signal["snapshots"][label] = {
-                    "price": price,
-                    "change_percent": (price / entry - 1) * 100,
-                    "recorded_at": now(),
-                }
+        for label, hours in due:
+            signal.setdefault("snapshots", {})
+            signal["snapshots"][label] = {
+                "price": price,
+                "change_percent": (price / entry - 1) * 100,
+                "recorded_at": now(),
+            }
 
 
 # =========================================================
@@ -1506,8 +1620,10 @@ def update_performance(performance):
 
 def recovery_scanner(store, state, recovery, performance):
     candidates = []
+    existing = set()
 
-    # Tokens previously found by ATH drop.
+    # Previously identified ATH DROP tokens.
+
     for mint, info in state["ath_watch"].items():
         item = store.get(mint)
 
@@ -1518,7 +1634,7 @@ def recovery_scanner(store, state, recovery, performance):
                 "symbol": info.get("symbol", "???"),
                 "price": None,
                 "market_cap": None,
-                "liquidity": 0,
+                "liquidity": None,
                 "url": info.get("url") or dex_url(mint),
                 "ath": info.get("ath"),
             }
@@ -1533,18 +1649,19 @@ def recovery_scanner(store, state, recovery, performance):
 
         if item.get("price"):
             candidates.append(item)
+            existing.add(mint)
 
-    # Also consider newly discovered candidates that meet the
-    # minimum market-cap requirement.
-    existing = {x["mint"] for x in candidates}
+    # New candidates are also examined independently.
+    # No score filter and no volume filter.
 
     for item in store.values():
         if (
             item["mint"] not in existing
             and (item.get("market_cap") or 0) >= MIN_MARKET_CAP
-            and item.get("price")
+            and (item.get("price") or 0) > 0
         ):
             candidates.append(item)
+            existing.add(item["mint"])
 
     if not candidates:
         return 0
@@ -1580,6 +1697,7 @@ def recovery_scanner(store, state, recovery, performance):
                 "first_seen": now(),
                 "last_stage": "FALLING",
                 "last_alert": {},
+                "highest_stage": None,
             },
         )
 
@@ -1590,16 +1708,14 @@ def recovery_scanner(store, state, recovery, performance):
 
         stage = result["stage"]
 
-        if stage == "NONE":
-            entry["last_stage"] = "FALLING"
-            continue
-
         if stage == "WATCH":
             category = "watch"
             cooldown = WATCH_COOLDOWN
+
         elif stage == "RECOVERY":
             category = "recovery"
             cooldown = RECOVERY_COOLDOWN
+
         else:
             category = "strong"
             cooldown = STRONG_COOLDOWN
@@ -1610,15 +1726,16 @@ def recovery_scanner(store, state, recovery, performance):
             entry["last_stage"] = stage
             continue
 
-        # Do not alert on a lower stage after a higher stage,
-        # unless the higher stage has not been reached before.
-        previous_stage = entry.get("highest_stage")
-
         rank = {
             "WATCH": 1,
             "RECOVERY": 2,
             "STRONG BUY": 3,
         }
+
+        previous_stage = entry.get("highest_stage")
+
+        # A lower alert is not sent after a higher stage
+        # has already been reached during the same day.
 
         if (
             previous_stage
@@ -1629,25 +1746,34 @@ def recovery_scanner(store, state, recovery, performance):
 
         message = recovery_message(item, result)
 
-        deliver(state, category, mint, message)
-
-        entry["last_alert"][category] = now()
-        entry["highest_stage"] = stage
-        entry["last_stage"] = stage
-
-        record_signal(
-            performance,
+        delivered = deliver(
+            state,
+            category,
             mint,
-            item,
-            result,
+            message,
         )
 
-        alerts += 1
+        if delivered:
+            entry["last_alert"][category] = now()
+            entry["highest_stage"] = stage
 
-        logging.info(
-            "RECOVERY ALERT %s | %s | score=%s",
-            mint, stage, result["score"]
-        )
+            record_signal(
+                performance,
+                mint,
+                item,
+                result,
+            )
+
+            alerts += 1
+
+            logging.info(
+                "RECOVERY ALERT %s | %s | score=%s",
+                mint,
+                stage,
+                result["score"],
+            )
+
+        entry["last_stage"] = stage
 
         write_json(RECOVERY_FILE, recovery)
         write_json(PERFORMANCE_FILE, performance)
@@ -1703,9 +1829,8 @@ def ath_reclaim_scanner(state):
             "⚠️ This does not guarantee a sustained breakout."
         )
 
-        deliver(state, "ath_reclaim", mint, message)
-
-        alerts += 1
+        if deliver(state, "ath_reclaim", mint, message):
+            alerts += 1
 
     return alerts
 
@@ -1718,7 +1843,10 @@ def find_breakout(candles, created_ts):
     if len(candles) < 10:
         return None
 
-    if created_ts and candles[0]["time"] > created_ts + 36 * 3600:
+    if (
+        created_ts
+        and candles[0]["time"] > created_ts + 36 * 3600
+    ):
         return None
 
     peak = 0
@@ -1749,14 +1877,16 @@ def find_breakout(candles, created_ts):
                 peak_time = candle["time"]
 
         else:
-            drawdown_low = min(drawdown_low, candle["low"])
+            drawdown_low = min(
+                drawdown_low,
+                candle["low"],
+            )
 
     if not armed:
         return None
 
     latest = candles[-1]
 
-    # Require candle CLOSE above the old ATH.
     if (
         latest["time"] <= drawdown_time
         or latest["close"] <= reference_ath
@@ -1780,7 +1910,10 @@ def breakout_scanner(store, state):
     if not candidates:
         return 0
 
-    cursor = int(state.get("breakout_cursor", 0)) % len(candidates)
+    cursor = (
+        int(state.get("breakout_cursor", 0))
+        % len(candidates)
+    )
 
     batch = (
         candidates[cursor:] + candidates[:cursor]
@@ -1833,9 +1966,9 @@ def breakout_scanner(store, state):
             "Confirmation requires a daily candle close above ATH."
         )
 
-        deliver(state, "breakout", mint, message)
+        if deliver(state, "breakout", mint, message):
+            alerts += 1
 
-        alerts += 1
         time.sleep(0.3)
 
     return alerts
@@ -1873,7 +2006,10 @@ def get_updates(offset):
             return payload.get("result", [])
 
     except Exception as exc:
-        logging.warning("Telegram updates failed: %s", exc)
+        logging.warning(
+            "Telegram updates failed: %s",
+            exc,
+        )
 
     return []
 
@@ -1954,7 +2090,11 @@ def create_chart(mint, timeframe, symbol):
         lo = candle["low"]
         cl = candle["close"]
 
-        color = "#16a34a" if cl >= op else "#dc2626"
+        color = (
+            "#16a34a"
+            if cl >= op
+            else "#dc2626"
+        )
 
         ax.plot(
             [x, x],
@@ -1987,7 +2127,6 @@ def create_chart(mint, timeframe, symbol):
     )
 
     ax.set_ylabel("Price (USD)")
-
     ax.xaxis_date()
 
     ax.xaxis.set_major_formatter(
@@ -2003,12 +2142,20 @@ def create_chart(mint, timeframe, symbol):
 
     fig.tight_layout()
 
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", mint)
+    safe = re.sub(
+        r"[^A-Za-z0-9_-]",
+        "_",
+        mint,
+    )
 
     filename = CHART_DIR / f"{safe}_{timeframe}.png"
 
     try:
-        fig.savefig(filename, bbox_inches="tight")
+        fig.savefig(
+            filename,
+            bbox_inches="tight",
+        )
+
     except Exception:
         logging.exception("Chart creation failed")
         plt.close(fig)
@@ -2021,7 +2168,6 @@ def create_chart(mint, timeframe, symbol):
 
 def process_forwarded(state):
     offset = int(state.get("telegram_update_offset", 0))
-
     updates = get_updates(offset)
 
     allowed = set(CHAT_IDS)
@@ -2072,11 +2218,15 @@ def process_forwarded(state):
                 symbol = live.get("symbol") or "TOKEN"
 
                 chart4 = create_chart(
-                    mint, "4h", symbol
+                    mint,
+                    "4h",
+                    symbol,
                 )
 
                 chart1 = create_chart(
-                    mint, "1d", symbol
+                    mint,
+                    "1d",
+                    symbol,
                 )
 
                 if not chart4 or not chart1:
@@ -2115,12 +2265,19 @@ def main():
     recovery = load_recovery()
     performance = load_performance()
 
-    logging.info("%s scan started", VERSION)
+    # DAILY RESET
+    daily_reset(state, recovery)
+
+    logging.info(
+        "%s scan started | UTC day=%s",
+        VERSION,
+        utc_day(),
+    )
 
     # 1. Telegram forwarded charts
     process_forwarded(state)
 
-    # 2. Discover tokens
+    # 2. Discover tokens from all sources
     store = {}
 
     source_dexscreener(store)
@@ -2134,13 +2291,17 @@ def main():
         len(store),
     )
 
-    # 3. Enrich token information
+    # 3. Enrich candidate information
     enrich(store)
 
-    # 4. ATH drop tracking
-    ath_count = ath_drop_filter(store, state)
+    # 4. Filter one: ATH DROP
+    ath_count = ath_drop_filter(
+        store,
+        state,
+    )
 
-    # 5. Smart recovery engine
+    # 5. Filter two: SMART RECOVERY
+    # No minimum score blocks a token.
     recovery_count = recovery_scanner(
         store,
         state,
@@ -2148,19 +2309,19 @@ def main():
         performance,
     )
 
-    # 6. ATH breakout
+    # 6. ATH BREAKOUT
     breakout_count = breakout_scanner(
         store,
         state,
     )
 
-    # 7. ATH reclaim
+    # 7. ATH RECLAIM
     reclaim_count = ath_reclaim_scanner(state)
 
     # 8. Performance tracking
     update_performance(performance)
 
-    # 9. Save all databases
+    # 9. Save databases
     write_json(SEEN_FILE, state)
     write_json(RECOVERY_FILE, recovery)
     write_json(PERFORMANCE_FILE, performance)
