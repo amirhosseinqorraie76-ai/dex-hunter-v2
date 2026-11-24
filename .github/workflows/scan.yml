@@ -1,5 +1,5 @@
 
-name: DEX Hunter V17 Daily Smart Recovery
+name: DEX Hunter V18 Low Cap Discovery
 
 on:
   schedule:
@@ -34,11 +34,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests matplotlib
 
-      - name: Run DEX Hunter V17
+      - name: Run DEX Hunter V18
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
           MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+          APISH_KEY: ${{ secrets.APISH_KEY }}
         run: |
           python bot.py
 
@@ -52,7 +53,7 @@ jobs:
             git add seen.json recovery.json performance.json
 
             if ! git diff --cached --quiet; then
-              git commit -m "Update DEX Hunter V17 databases"
+              git commit -m "Update DEX Hunter V18 databases"
               git push
             else
               echo "No database changes"
