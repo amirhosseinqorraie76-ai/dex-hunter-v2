@@ -20,7 +20,11 @@
       "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|1012061523",
       "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|1507608801",
       "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|6665909136",
-      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|98529959"
+      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|98529959",
+      "GHWEB3FsfqDbNBt9QxVU7kXkUh1cX7kFk5NVDkgApump|1012061523",
+      "GHWEB3FsfqDbNBt9QxVU7kXkUh1cX7kFk5NVDkgApump|1507608801",
+      "GHWEB3FsfqDbNBt9QxVU7kXkUh1cX7kFk5NVDkgApump|6665909136",
+      "GHWEB3FsfqDbNBt9QxVU7kXkUh1cX7kFk5NVDkgApump|98529959"
     ],
     "breakout": [],
     "watch": [],
@@ -140,10 +144,19 @@
       "pair_created_ts": 1792537216.0,
       "registered_at": 1795532130.7860134,
       "url": "https://dexscreener.com/solana/6dnxwecbtdnnstpb5tdnxzsfge3hmsngeuzhdue4b1ph"
+    },
+    "GHWEB3FsfqDbNBt9QxVU7kXkUh1cX7kFk5NVDkgApump": {
+      "ath": 0.00012007980795066752,
+      "name": "SUPER CLAUDIA INU",
+      "symbol": "SCINU",
+      "created_ts": null,
+      "pair_created_ts": 1795457380.0,
+      "registered_at": 1795533096.2660902,
+      "url": "https://dexscreener.com/solana/71rfpnfdq3bpbycqt2jtkawtlwk2xabcuwxoas9s2pft"
     }
   },
-  "ath_cursor": 35,
-  "breakout_cursor": 35,
+  "ath_cursor": 40,
+  "breakout_cursor": 40,
   "buy_cursor": 0,
   "telegram_update_offset": 435217154,
   "daily_reset_date": "2026-11-24",
