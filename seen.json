@@ -1,6 +1,10 @@
 {
   "sent": {
     "ath": [
+      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1012061523",
+      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1507608801",
+      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|6665909136",
+      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|98529959",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1012061523",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1507608801",
       "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|6665909136",
@@ -167,12 +171,21 @@
       "pair_created_ts": 1795433571.0,
       "registered_at": 1795533262.9166982,
       "url": "https://dexscreener.com/solana/7hki8tjzruwrydhew2ucaob5sg78wi1l1ppx1uvujxzw"
+    },
+    "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM": {
+      "ath": 0.013233970592518188,
+      "name": "Claudia",
+      "symbol": "CLAUDIA",
+      "created_ts": 1791337470.0,
+      "pair_created_ts": 1791337470.0,
+      "registered_at": 1795555691.327965,
+      "url": "https://dexscreener.com/solana/fe7bpdycs74gqicuf14hwgumtopkv1d9mdyvx5btohfr"
     }
   },
-  "ath_cursor": 7,
-  "breakout_cursor": 7,
+  "ath_cursor": 12,
+  "breakout_cursor": 12,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-24",
-  "last_apish_fetch_ts": 1795542341.1128473
+  "last_apish_fetch_ts": 1795555690.3514655
 }
