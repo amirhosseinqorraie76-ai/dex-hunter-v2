@@ -12,7 +12,11 @@
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1012061523",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1507608801",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|6665909136",
-      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959"
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959",
+      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|1012061523",
+      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|1507608801",
+      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|6665909136",
+      "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump|98529959"
     ],
     "breakout": [],
     "watch": [],
@@ -122,11 +126,21 @@
       "created_ts": 1788985935.0,
       "registered_at": 1795299227.6274219,
       "url": "https://dexscreener.com/solana/cb7zrgplhji3th7htxykeqbxvnjppetvckxuwakbuhxu"
+    },
+    "CSocnzcRpgSCr1naKcNTieWZUxb6rABe45j844m7pump": {
+      "ath": 0.04769431279265596,
+      "name": "Aura Final Boss",
+      "symbol": "Kimchi",
+      "created_ts": 1792537216.0,
+      "pair_created_ts": 1792537216.0,
+      "registered_at": 1795532130.7860134,
+      "url": "https://dexscreener.com/solana/6dnxwecbtdnnstpb5tdnxzsfge3hmsngeuzhdue4b1ph"
     }
   },
-  "ath_cursor": 15,
-  "breakout_cursor": 15,
+  "ath_cursor": 20,
+  "breakout_cursor": 20,
   "buy_cursor": 0,
   "telegram_update_offset": 435217154,
-  "daily_reset_date": "2026-11-24"
+  "daily_reset_date": "2026-11-24",
+  "last_apish_fetch_ts": 1795532129.977754
 }
