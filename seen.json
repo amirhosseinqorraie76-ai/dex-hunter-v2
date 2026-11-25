@@ -4,7 +4,11 @@
       "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1012061523",
       "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|1507608801",
       "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|6665909136",
-      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|98529959"
+      "2j5SaS7xy776qCBpyPQbZjyQSAtKiFgrwjfErthnW2ZM|98529959",
+      "CUg7AzWL5p8imZVqqdjEPgRhUsXAkBMW5JxkSJ9fpump|1012061523",
+      "CUg7AzWL5p8imZVqqdjEPgRhUsXAkBMW5JxkSJ9fpump|1507608801",
+      "CUg7AzWL5p8imZVqqdjEPgRhUsXAkBMW5JxkSJ9fpump|6665909136",
+      "CUg7AzWL5p8imZVqqdjEPgRhUsXAkBMW5JxkSJ9fpump|98529959"
     ],
     "breakout": [],
     "watch": [],
@@ -152,12 +156,21 @@
       "pair_created_ts": 1791337470.0,
       "registered_at": 1795555691.327965,
       "url": "https://dexscreener.com/solana/fe7bpdycs74gqicuf14hwgumtopkv1d9mdyvx5btohfr"
+    },
+    "CUg7AzWL5p8imZVqqdjEPgRhUsXAkBMW5JxkSJ9fpump": {
+      "ath": 0.0011463425688354077,
+      "name": "Huss",
+      "symbol": "Huss",
+      "created_ts": 1794850114.0,
+      "pair_created_ts": 1794850114.0,
+      "registered_at": 1795635430.5803285,
+      "url": "https://dexscreener.com/solana/gkhcyzexdi2sveqnagsg3qxrkzshdr5dxrd482km2hxx"
     }
   },
-  "ath_cursor": 15,
-  "breakout_cursor": 15,
+  "ath_cursor": 20,
+  "breakout_cursor": 20,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-25",
-  "last_apish_fetch_ts": 1795613270.639331
+  "last_apish_fetch_ts": 1795635427.7386913
 }
