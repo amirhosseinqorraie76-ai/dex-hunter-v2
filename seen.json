@@ -154,10 +154,10 @@
       "url": "https://dexscreener.com/solana/fe7bpdycs74gqicuf14hwgumtopkv1d9mdyvx5btohfr"
     }
   },
-  "ath_cursor": 10,
-  "breakout_cursor": 10,
+  "ath_cursor": 15,
+  "breakout_cursor": 15,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-25",
-  "last_apish_fetch_ts": 1795599786.7184472
+  "last_apish_fetch_ts": 1795613270.639331
 }
