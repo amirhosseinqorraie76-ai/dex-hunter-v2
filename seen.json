@@ -158,8 +158,8 @@
       "url": "https://dexscreener.com/solana/gkhcyzexdi2sveqnagsg3qxrkzshdr5dxrd482km2hxx"
     }
   },
-  "ath_cursor": 10,
-  "breakout_cursor": 10,
+  "ath_cursor": 15,
+  "breakout_cursor": 15,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-26",
