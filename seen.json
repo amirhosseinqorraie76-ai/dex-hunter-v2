@@ -1,6 +1,11 @@
 {
   "sent": {
-    "ath": [],
+    "ath": [
+      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|1012061523",
+      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|1507608801",
+      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|6665909136",
+      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|98529959"
+    ],
     "breakout": [],
     "watch": [],
     "recovery": [],
@@ -156,12 +161,21 @@
       "pair_created_ts": 1794850114.0,
       "registered_at": 1795635430.5803285,
       "url": "https://dexscreener.com/solana/gkhcyzexdi2sveqnagsg3qxrkzshdr5dxrd482km2hxx"
+    },
+    "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f": {
+      "ath": 0.003010009996284309,
+      "name": "Basket",
+      "symbol": "BASKET",
+      "created_ts": 1795581782.0,
+      "pair_created_ts": 1795581782.0,
+      "registered_at": 1795692303.5061007,
+      "url": "https://dexscreener.com/solana/cixcofspwhnywjsodxxxvld6um5fh7w8mfpl9mpqpqtx"
     }
   },
-  "ath_cursor": 15,
-  "breakout_cursor": 15,
+  "ath_cursor": 20,
+  "breakout_cursor": 20,
   "buy_cursor": 0,
   "telegram_update_offset": 435217156,
   "daily_reset_date": "2026-11-26",
-  "last_apish_fetch_ts": 1795683973.8345923
+  "last_apish_fetch_ts": 1795692302.4582856
 }
