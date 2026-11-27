@@ -1,11 +1,6 @@
 {
   "sent": {
-    "ath": [
-      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|1012061523",
-      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|1507608801",
-      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|6665909136",
-      "3Tg6YnNrfPdFfsY14MaNsDMWLseAyrUDS3myJtbaJN6f|98529959"
-    ],
+    "ath": [],
     "breakout": [],
     "watch": [],
     "recovery": [],
@@ -172,10 +167,10 @@
       "url": "https://dexscreener.com/solana/cixcofspwhnywjsodxxxvld6um5fh7w8mfpl9mpqpqtx"
     }
   },
-  "ath_cursor": 25,
-  "breakout_cursor": 25,
+  "ath_cursor": 5,
+  "breakout_cursor": 5,
   "buy_cursor": 0,
   "telegram_update_offset": 435217157,
-  "daily_reset_date": "2026-11-26",
-  "last_apish_fetch_ts": 1795724760.420924
+  "daily_reset_date": "2026-11-27",
+  "last_apish_fetch_ts": 1795748878.3612566
 }
