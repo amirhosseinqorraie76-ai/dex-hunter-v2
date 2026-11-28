@@ -9,9 +9,20 @@
       "entry_price": 0.005645,
       "entry_time": 1795836519.2213583,
       "day": "2026-11-28",
-      "max_price": 0.005645,
+      "max_price": 0.00575,
       "min_price": 0.005645,
-      "snapshots": {}
+      "snapshots": {
+        "1h": {
+          "price": 0.00575,
+          "change_percent": 1.860053144375562,
+          "recorded_at": 1795868083.7786293
+        },
+        "6h": {
+          "price": 0.00575,
+          "change_percent": 1.860053144375562,
+          "recorded_at": 1795868083.778631
+        }
+      }
     }
   ]
 }
