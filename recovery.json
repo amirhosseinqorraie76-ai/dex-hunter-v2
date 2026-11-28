@@ -1,4 +1,17 @@
 {
-  "tokens": {},
-  "cursor": 100
+  "tokens": {
+    "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump": {
+      "first_seen": 1795836517.8546932,
+      "last_stage": "WATCH",
+      "last_alert": {
+        "watch": 1795836519.2213428
+      },
+      "highest_stage": "WATCH",
+      "last_score": 43,
+      "last_phase": "BOTTOM FORMING",
+      "last_price": 0.005645,
+      "last_checked": 1795836517.854695
+    }
+  },
+  "cursor": 20
 }

@@ -4,14 +4,15 @@
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1012061523",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|1507608801",
       "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|6665909136",
-      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959",
-      "PgFtGGquvnv2zEkjG2N2QPvBTBrafuExGYEqahRpump|1012061523",
-      "PgFtGGquvnv2zEkjG2N2QPvBTBrafuExGYEqahRpump|1507608801",
-      "PgFtGGquvnv2zEkjG2N2QPvBTBrafuExGYEqahRpump|6665909136",
-      "PgFtGGquvnv2zEkjG2N2QPvBTBrafuExGYEqahRpump|98529959"
+      "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump|98529959"
     ],
     "breakout": [],
-    "watch": [],
+    "watch": [
+      "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1012061523",
+      "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|1507608801",
+      "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|6665909136",
+      "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump|98529959"
+    ],
     "recovery": [],
     "strong": [],
     "ath_reclaim": []
@@ -186,10 +187,10 @@
       "url": "https://dexscreener.com/solana/ehpzesdxtymvwz1iy5nt3lrnjy1xbc1kgqspl1kqnyiv"
     }
   },
-  "ath_cursor": 25,
-  "breakout_cursor": 25,
+  "ath_cursor": 5,
+  "breakout_cursor": 5,
   "buy_cursor": 0,
   "telegram_update_offset": 435217157,
-  "daily_reset_date": "2026-11-27",
-  "last_apish_fetch_ts": 1795814790.5208235
+  "daily_reset_date": "2026-11-28",
+  "last_apish_fetch_ts": 1795836514.04356
 }

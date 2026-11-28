@@ -1,3 +1,17 @@
 {
-  "signals": []
+  "signals": [
+    {
+      "mint": "4CxjZyMNoF1p6eXHXHv1TWpS2X47CuUmLwtGe18spump",
+      "name": "ni hao cat",
+      "symbol": "mihao",
+      "stage": "WATCH",
+      "score": 43,
+      "entry_price": 0.005645,
+      "entry_time": 1795836519.2213583,
+      "day": "2026-11-28",
+      "max_price": 0.005645,
+      "min_price": 0.005645,
+      "snapshots": {}
+    }
+  ]
 }
